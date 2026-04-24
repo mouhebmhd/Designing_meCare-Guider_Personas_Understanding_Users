@@ -1,0 +1,6 @@
+# ignore all data  files ending with json in the folder 
+*.json
+*.csv
+*.pkl
+*.done
+*.pyc
