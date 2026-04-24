@@ -1,0 +1,209 @@
+======================================================================
+  HEALTH LITERACY — PERSONA REPORT
+  Generated from hl_profiling_results.csv
+======================================================================
+
+══════════════════════════════════════════════════════════════════════
+  PERSONA: BALANCED
+  Archetype : The Health-Savvy Self-Advocate
+  Tagline   : "Reads widely, questions carefully, acts with confidence."
+══════════════════════════════════════════════════════════════════════
+
+  POPULATION STATISTICS
+──────────────────────────────────────────────────────────────────────
+  Users in dataset : 133,884 (42.7% of total)
+  Dominant HL level: Intermediate
+  HL breakdown     : Low 0.0% | Basic 0.0% | Intermediate 57.4% | High 42.6%
+
+  FACTOR PROFILE  (mean ± std)
+──────────────────────────────────────────────────────────────────────
+  F1 Core Integrated Proficiency : +1.094 ± 1.407
+  F2 Digital Proficiency         : -0.128 ± 0.424
+  F3 Applied Functional Literacy : -0.039 ± 0.262
+  Avg epistemic uncertainty (σ)  : 0.2348
+  Flagged for expert review      : 0.5%
+
+  DESCRIPTION
+──────────────────────────────────────────────────────────────────────
+  This user demonstrates well-rounded health literacy across all five dimensions. They can comprehend medical text (FHL), ask contextualised questions (CHL), reason about causality and evidence (CRHL), use digital health tools appropriately (DHL), and express their situation articulately (EHL). They typically understand treatment options, weigh tradeoffs, and engage productively with both clinicians and peer communities.
+
+  STRENGTHS
+──────────────────────────────────────────────────────────────────────
+  ✓  Integrates information from multiple credible sources
+  ✓  Frames questions with relevant personal context
+  ✓  Comfortable using medical terminology
+  ✓  Recognises hedging language and acknowledges uncertainty
+
+  CHALLENGES
+──────────────────────────────────────────────────────────────────────
+  ✗  May over-research and experience information overload
+  ✗  Can sometimes conflate authoritative sources with anecdotal ones
+
+  COMMUNICATION TIPS  (for clinicians / content designers)
+──────────────────────────────────────────────────────────────────────
+  →  Provide evidence-based rationale; they respond well to citations
+  →  Encourage shared-decision-making framing
+  →  Avoid over-simplifying — they prefer complete information
+
+  UX / DESIGN TIPS
+──────────────────────────────────────────────────────────────────────
+  →  Dense but well-structured content is appropriate
+  →  Link to primary sources (guidelines, trials)
+  →  Decision-support tools (pros/cons tables) are well received
+
+  CENTROID EXEMPLAR POSTS
+──────────────────────────────────────────────────────────────────────
+  [1] HL=High  F1=+1.075  F2=-0.035  F3=-0.065  σ=0.244
+      A week ago, my psych prescribed adderall because my depression/Fibro fatigue has gotten so bad I'm unable to be productive at work. The first day or two I felt MUCH better, but i've lost ~7lbs in 5 days and have been sleeping about4hrs a night. And when the drug wears off, I'm left feeling really we…
+
+  [2] HL=High  F1=+1.106  F2=-0.029  F3=-0.042  σ=0.230
+      Hello,  I got some scary news at urologist yesterday and wanted to post for some advice.  I apologize but going to list everything because Dr. Google is all over the place with results and most of them are pretty scary as well.49 year old male, diagnosed with Prostatitis in 20's.  No blood tests dia…
+
+  [3] HL=High  F1=+1.127  F2=-0.033  F3=-0.055  σ=0.231
+      I think I have reached the end of my rope. No one cares, no one listens, no one helps. I tried talking to my gastro Dr today and he says to me after I explain some stuff that he thinks I have esophagus mobility issues but he doesn't see the need to perform any tests. Even though my medicine isn't he…
+
+  [4] HL=High  F1=+1.104  F2=-0.045  F3=-0.097  σ=0.230
+      Good morning,I am new to this and hope its ok to ask some questions aboutmy husbands sickness. My husband and I were told about15 years ago that he had hep c, he never really had any symptoms until dec 2007 when he ended up in the hospital because he was yellow, they did a bunch of test and told us …
+
+  [5] HL=High  F1=+1.127  F2=-0.041  F3=-0.083  σ=0.264
+      Hi all,I started this 2 weeks ago... and a couple people asked for an update on how it works.Basically, it "works" the same as IV Toradol.  The medication itself has taken the edge off of a couple of headaches... but that's aboutit.However, the delivery system is TERRIBLE.  It's a nasal spray - but …
+
+
+══════════════════════════════════════════════════════════════════════
+  PERSONA: TRANSITIONAL
+  Archetype : The Curious Newcomer
+  Tagline   : "Learning the language of health, one question at a time."
+══════════════════════════════════════════════════════════════════════
+
+  POPULATION STATISTICS
+──────────────────────────────────────────────────────────────────────
+  Users in dataset : 161,983 (51.6% of total)
+  Dominant HL level: Basic
+  HL breakdown     : Low 48.0% | Basic 48.2% | Intermediate 0.0% | High 3.7%
+
+  FACTOR PROFILE  (mean ± std)
+──────────────────────────────────────────────────────────────────────
+  F1 Core Integrated Proficiency : -1.331 ± 2.571
+  F2 Digital Proficiency         : +0.244 ± 0.586
+  F3 Applied Functional Literacy : +0.077 ± 0.449
+  Avg epistemic uncertainty (σ)  : 0.1933
+  Flagged for expert review      : 2.7%
+
+  DESCRIPTION
+──────────────────────────────────────────────────────────────────────
+  This user is at an earlier stage of health literacy development. Their core integrated proficiency (F1) is below median, and neither digital nor applied literacy is particularly pronounced. They often seek basic explanations, struggle with medical jargon, and rely heavily on plain-language community advice. Their posts tend to be shorter, emotionally loaded, and question-driven, reflecting genuine uncertainty about their health situation.
+
+  STRENGTHS
+──────────────────────────────────────────────────────────────────────
+  ✓  High motivation to learn and improve
+  ✓  Asks direct, honest questions without assumed background
+  ✓  Receptive to accessible explanations
+  ✓  Community-oriented and likely to share useful answers with peers
+
+  CHALLENGES
+──────────────────────────────────────────────────────────────────────
+  ✗  Difficulty distinguishing reliable from unreliable sources
+  ✗  Limited ability to critically evaluate treatment claims
+  ✗  May misinterpret complex or technical responses
+  ✗  Higher risk of acting on misinformation
+
+  COMMUNICATION TIPS  (for clinicians / content designers)
+──────────────────────────────────────────────────────────────────────
+  →  Use plain language and define any clinical term used
+  →  Break down advice into small, numbered steps
+  →  Validate their concern before delivering information
+  →  Recommend trusted lay resources (patient leaflets, NHS, Mayo Clinic)
+
+  UX / DESIGN TIPS
+──────────────────────────────────────────────────────────────────────
+  →  Short paragraphs, large font, iconography
+  →  Avoid acronyms or spell them out on first use
+  →  Progress indicators and checklists support engagement
+
+  CENTROID EXEMPLAR POSTS
+──────────────────────────────────────────────────────────────────────
+  [1] HL=Basic  F1=-1.332  F2=+0.201  F3=+0.092  σ=0.146
+      I've been to the ER countless of times, and I've seen an allergist and a pulmonary specialist, and despite this and the meds that I'm on: Singulair, Claritin, Advair, Atrovent, and Albuterol on emergency only basis, I still get exacerbations of my symptoms. Not technically severe asthma attacks by a…
+
+  [2] HL=Basic  F1=-1.338  F2=+0.203  F3=+0.100  σ=0.149
+      I woke up feeling good today and I worked out left the house. I've been running errands, I'm at target right now and my head started hurting again. I feel all this pressure at the top and back of my head and my thoughts went right back to it being a tumor. I even feel like I'm walking g sideways. Al…
+
+  [3] HL=Basic  F1=-1.301  F2=+0.216  F3=+0.104  σ=0.136
+      i know its not appendix because no fever or rebound but i feel like its trapped at times? Im BARELY eating im on TPN.. What is this>? inflimation.anyone get real sharp belly button pain or right side.. like when u move or reach...…
+
+  [4] HL=Basic  F1=-1.338  F2=+0.222  F3=+0.122  σ=0.157
+      Hi all...... just wanted to let you know that Shannon is home from surgery! The doctor said that everything went really well, but she is hurting BAD!!So please send healing thoughts her way and I will do my best to take care of her!!Take Care Everyone!Beckey…
+
+  [5] HL=Basic  F1=-1.355  F2=+0.202  F3=+0.095  σ=0.145
+      This morning a co-worker told me that my car had a dent on the door. I just said okay and left it alone because I know my car don't have any dent. I didn't realize it was April Fools' Day until a short while ago...LolI think it was just luck I didn't get prank this morningLolDid any of you prank any…
+
+
+══════════════════════════════════════════════════════════════════════
+  PERSONA: SPECIALIZED
+  Archetype : The Domain Expert (Niche Proficiency)
+  Tagline   : "Deep knowledge in one lane; gaps in the others."
+══════════════════════════════════════════════════════════════════════
+
+  POPULATION STATISTICS
+──────────────────────────────────────────────────────────────────────
+  Users in dataset : 17,977 (5.7% of total)
+  Dominant HL level: High
+  HL breakdown     : Low 3.9% | Basic 4.6% | Intermediate 5.8% | High 85.7%
+
+  FACTOR PROFILE  (mean ± std)
+──────────────────────────────────────────────────────────────────────
+  F1 Core Integrated Proficiency : +3.845 ± 2.951
+  F2 Digital Proficiency         : -1.245 ± 0.976
+  F3 Applied Functional Literacy : -0.406 ± 0.650
+  Avg epistemic uncertainty (σ)  : 0.4494
+  Flagged for expert review      : 23.6%
+
+  DESCRIPTION
+──────────────────────────────────────────────────────────────────────
+  This user shows an atypical literacy profile — either unusually strong or weak on the digital (F2) or applied/functional (F3) dimension while their core proficiency (F1) may be moderate. Two sub-types emerge:
+
+  • Digitally-Specialized (|F2| > 1.0): Highly proficient at finding, interpreting and citing digital health resources — PubMed, clinical databases, online symptom checkers — but may lack applied communication skills or struggle to translate findings into personal decisions.
+
+  • Functionally-Specialized (|F3| > 0.8): Highly capable of expressing personal health narratives and applying information to their own context, but may not actively seek out or critically evaluate external evidence. Often seen in long-term condition patients who have accumulated lived expertise.
+
+  STRENGTHS
+──────────────────────────────────────────────────────────────────────
+  ✓  Digitally-Specialized: skilled at evidence synthesis and source evaluation
+  ✓  Functionally-Specialized: rich personal context, applies info to real life
+  ✓  Both sub-types contribute high-quality signal to peer communities
+
+  CHALLENGES
+──────────────────────────────────────────────────────────────────────
+  ✗  Digitally-Specialized: may over-index on research, under-personalise care
+  ✗  Functionally-Specialized: anecdotal reasoning, limited evidence appraisal
+  ✗  Profile mismatch can produce high model uncertainty (flagged)
+
+  COMMUNICATION TIPS  (for clinicians / content designers)
+──────────────────────────────────────────────────────────────────────
+  →  For Digitally-Specialized: bridge evidence to personal decision context
+  →  For Functionally-Specialized: affirm lived experience, gently introduce evidence
+  →  Tailor depth of clinical detail to the detected sub-type
+
+  UX / DESIGN TIPS
+──────────────────────────────────────────────────────────────────────
+  →  Digitally-Specialized: advanced filters, export to reference manager, DOI links
+  →  Functionally-Specialized: narrative/story formats, peer testimonials
+  →  Adaptive content depth based on sub-type detection
+
+  CENTROID EXEMPLAR POSTS
+──────────────────────────────────────────────────────────────────────
+  [1] HL=High  F1=+3.904  F2=-1.234  F3=-0.418  σ=0.348
+      Hi All,I am 27 years old male. Been suffering with IBS since birth - starting with Lactose intolerant from childhood. Which made me to grow with low immunity and hyper sensitive body. Recently got anal fissure because of explosive diarrhea due to strong antibiotic taken for flu. And had anal sphinct…
+
+  [2] HL=High  F1=+3.890  F2=-1.128  F3=-0.475  σ=0.319
+      I was feeling better after i finished doxy.But, I still have some joint pains. I was waiting, because the CDC site says that after finisning treatment some people have joint pain for post lyme up to 6 months or more....before I got lyme, I was having some carpal tunnel signs due to my work in a bake…
+
+  [3] HL=High  F1=+3.770  F2=-1.157  F3=-0.501  σ=0.315
+      Wow... I know this is going on all over the country, but wow....This is in MY area!!http://www.heraldnet.com/article/20111206/NEWS01/712069879#Pharmacy-robber-strikes-againPublished: Tuesday, December 6, 2011Everett police ask for help identifying a man suspected of robbing pharmacies in Everett and…
+
+  [4] HL=High  F1=+3.855  F2=-1.100  F3=-0.335  σ=0.349
+      I am looking to see if anyone on here 1.)had a deer tick feeding on them for several days 2.) thought it was a scab 3.) started to get pain at "scab" site and dramatically powerful head spins before they even knew they had a tick 4.) discovered it was a tick after letting it feed for 2 more days 5.)…
+
+  [5] HL=High  F1=+3.957  F2=-1.133  F3=-0.445  σ=0.316
+      Maybe this has been seen before and I'm behind the curve, but saw this yesterday.  I apologize that it's a long article and I wasn't sure how to post it here."Dietary Supplement May Prevent and Treat Prostate Cancer."  "Researchers at the University of Miami have found that an over-the-counter suppl…
+
