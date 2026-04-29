@@ -2,12 +2,17 @@
 =============================================================================
   Health Literacy — Profile Dashboard  (Python / Dash)
 =============================================================================
-  Requirements:
-      pip install dash dash-bootstrap-components plotly
-
-  Run:
-      python hl_dashboard.py
-  Then open  http://127.0.0.1:8050
+  PATCH NOTES (v3 → v3.1):
+  - Removed "ENTITY" from MEDICAL_ENTITY_LABELS.
+    en_core_sci_lg uses "ENTITY" as a catch-all that tags almost every noun,
+    including plain words like "discharge", "dose", "list", "test", "doctor".
+  - Added _NER_PLAIN_ENGLISH_STOPWORDS: a broad set of common words that
+    scispaCy incorrectly tags but are NOT medical jargon for lay readers.
+  - Added _is_plain_english_ner() guard inside _detect_jargon_spans() so
+    NER spans whose text (lowercased) is in the stopword set are skipped.
+  - Ordinal / numeric tokens are now explicitly rejected from the NER layer.
+  - Multi-token NER spans are only accepted if at least one token survives
+    the plain-English filter (prevents "twice daily" type spans).
 =============================================================================
 """
 
@@ -21,14 +26,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import textstat
 import spacy
+from spacy.matcher import PhraseMatcher
 import nltk
 
+try:
+    import wordfreq as _wordfreq
+    _WORDFREQ_AVAILABLE = True
+except ImportError:
+    _WORDFREQ_AVAILABLE = False
+    print("wordfreq not installed — syllable Zipf filter disabled. Run: pip install wordfreq")
+
 from health_literacy_regex_patterns import (
-    extract_fhl_features,
-    extract_chl_features,
-    extract_crhl_features,
-    extract_dhl_features,
-    extract_ehl_features,
     extract_all_features,
     HealthLiteracyPatterns,
 )
@@ -40,8 +48,10 @@ import plotly.graph_objects as go
 
 nltk.download("punkt", quiet=True)
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-MODEL_PATH = "./hl_bvae_model.pt"
+# =============================================================================
+# CONFIG
+# =============================================================================
+MODEL_PATH = "../../assets/hl_bvae_model.pt"
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MC_PASSES  = 50
 
@@ -56,18 +66,27 @@ HL_COLOURS = {
     "Intermediate": "#3b82f6",
     "High":         "#22c55e",
 }
+
 AGENT_COLOURS = {
-    "Jargon":      "#f43f5e",   # rose
-    "Explanation": "#8b5cf6",   # violet
-    "Fluency":     "#06b6d4",   # cyan
-    "Coherence":   "#f59e0b",   # amber
+    "Explanation": "#8b5cf6",
+    "Fluency":     "#06b6d4",
+    "Coherence":   "#f59e0b",
 }
+
+JARGON_LAYER_COLOURS = {
+    "NER":        {"color": "#f43f5e", "label": "Jargon · NER",        "badge": "NER",   "bg": "rgba(244,63,94,0.15)"},
+    "lexicon":    {"color": "#facc15", "label": "Jargon · Lexicon",    "badge": "LEX",   "bg": "rgba(250,204,21,0.15)"},
+    "morphology": {"color": "#fb923c", "label": "Jargon · Morphology", "badge": "MORPH", "bg": "rgba(251,146,60,0.15)"},
+    "syllable":   {"color": "#a78bfa", "label": "Jargon · Syllable",   "badge": "SYL",   "bg": "rgba(167,139,250,0.15)"},
+}
+
 CLARITY_ANNOTATION_COLOURS = {
-    "Jargon":      {"color": "#f43f5e", "label": "Jargon — unexplained medical term",    "bg": "rgba(244,63,94,0.15)"},
-    "Explanation": {"color": "#8b5cf6", "label": "Explanation — inline definition",       "bg": "rgba(139,92,246,0.15)"},
-    "Coherence":   {"color": "#f59e0b", "label": "Coherence — discourse connective",      "bg": "rgba(245,158,11,0.15)"},
-    "Fluency":     {"color": "#06b6d4", "label": "Fluency — complex/long word",           "bg": "rgba(6,182,212,0.15)"},
+    **{f"Jargon-{k}": v for k, v in JARGON_LAYER_COLOURS.items()},
+    "Explanation": {"color": "#8b5cf6", "label": "Explanation — inline definition",  "bg": "rgba(139,92,246,0.15)"},
+    "Coherence":   {"color": "#f59e0b", "label": "Coherence — discourse connective", "bg": "rgba(245,158,11,0.15)"},
+    "Fluency":     {"color": "#06b6d4", "label": "Fluency — complex long word",      "bg": "rgba(6,182,212,0.15)"},
 }
+
 DIMENSION_COLOURS = {
     "FHL":  {"color": "#3b82f6", "label": "Functional HL",    "bg": "rgba(59,130,246,0.15)"},
     "CHL":  {"color": "#eab308", "label": "Communicative HL", "bg": "rgba(234,179,8,0.15)"},
@@ -75,32 +94,427 @@ DIMENSION_COLOURS = {
     "DHL":  {"color": "#a855f7", "label": "Digital HL",       "bg": "rgba(168,85,247,0.15)"},
     "EHL":  {"color": "#06b6d4", "label": "Expressed HL",     "bg": "rgba(6,182,212,0.15)"},
 }
-# ─── Color helper — defined first, used everywhere below ──────────────────────
+
+
 def hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
     try:
         hx = str(hex_color).strip().lstrip("#").ljust(6, "0")[:6]
-        r  = int(hx[0:2], 16)
-        g  = int(hx[2:4], 16)
-        b  = int(hx[4:6], 16)
+        r, g, b = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
         return f"rgba({r},{g},{b},{alpha})"
     except Exception:
         return f"rgba(99,102,241,{alpha})"
 
-# ─── spaCy ────────────────────────────────────────────────────────────────────
-try:
-    nlp = spacy.load("en_core_sci_md")
-except OSError:
-    nlp = spacy.load("en_core_web_sm")
 
-# Used by clarity_consensus and annotate_clarity (spaCy NER-based functions)
-MEDICAL_ENTITY_LABELS = {"DISEASE", "CHEMICAL", "ENTITY"}
+# =============================================================================
+# spaCy — load best available model
+# =============================================================================
+nlp = None
+for _model_name in ("en_core_sci_lg", "en_core_sci_md", "en_core_web_sm"):
+    try:
+        nlp = spacy.load(_model_name)
+        print(f"spaCy model loaded: {_model_name}")
+        break
+    except OSError:
+        continue
 
-# ─── BVAE ─────────────────────────────────────────────────────────────────────
+if nlp is None:
+    raise RuntimeError(
+        "No spaCy model found. Install one:\n"
+        "  pip install scispacy && pip install https://s3-us-west-2.amazonaws.com/"
+        "ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz\n"
+        "or: python -m spacy download en_core_web_sm"
+    )
+
+# =============================================================================
+# NER label set
+# =============================================================================
+# ── IMPORTANT: "ENTITY" is intentionally excluded. ───────────────────────────
+# en_core_sci_lg applies "ENTITY" to almost every noun phrase, including
+# completely plain words ("discharge", "dose", "doctor", "list", "test").
+# Keeping only the specific, high-precision labels below dramatically reduces
+# false positives while retaining true medical terms (diseases, chemicals,
+# genes, anatomical structures).
+# =============================================================================
+MEDICAL_ENTITY_LABELS = {
+    # scispaCy BC5CDR model
+    "DISEASE", "CHEMICAL",
+    # scispaCy CRAFT / JNLPBA model variants
+    "Gene_or_gene_product", "Simple_chemical", "Cell",
+    "Cellular_component", "Developing_anatomical_structure",
+    "Immaterial_anatomical_entity", "Multi_tissue_structure",
+    "Organ", "Organism", "Organism_substance", "Pathological_formation",
+    "Tissue", "Amino_acid", "Anatomical_system",
+    # en_core_web_sm fallback (low precision but zero cost)
+    "ORG", "PRODUCT",
+}
+# NOTE: "ENTITY" (the en_core_sci_lg catch-all) is NOT in this set.
+
+# =============================================================================
+# NER PLAIN-ENGLISH STOPWORD FILTER
+#
+# Words that en_core_sci_lg routinely tags as ENTITY / CHEMICAL / DISEASE
+# but which are everyday English and should NOT be shown as jargon to patients.
+# This list covers the common false-positive categories:
+#   • Time / frequency expressions  (daily, twice, monthly, morning, dose…)
+#   • Ordinals / numbers            (first, second, twelve, fourteen…)
+#   • Body parts in plain usage     (lips, face, leg, arm, back…)
+#   • Clinical-but-plain nouns      (doctor, nurse, patient, hospital…)
+#   • Actions / generic verbs       (report, stop, take, call, watch…)
+#   • Generic descriptors           (new, early, written, current…)
+#   • Common compound fragments     (advice line, patient portal, blood thinners…)
+# =============================================================================
+_NER_PLAIN_ENGLISH_STOPWORDS: frozenset[str] = frozenset({
+    # ── Time / frequency ──────────────────────────────────────────────────────
+    "daily", "twice", "twice daily", "once", "once daily", "monthly", "weekly",
+    "every day", "every morning", "every night", "every evening",
+    "morning", "evening", "night", "bedtime", "at bedtime",
+    "dose", "doses", "dosing",
+    "twelve months", "twelve", "fourteen", "fourteen days",
+    "two-minute", "two minute", "two‐minute",
+    "months", "days", "weeks", "hours", "minutes",
+    "first", "second", "third", "fourth", "fifth",
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    # ── Body parts in plain language ─────────────────────────────────────────
+    "lips", "lip", "face", "arm", "leg", "back", "chest", "skin",
+    "hand", "hands", "foot", "feet", "eye", "eyes", "ear", "ears",
+    "head", "neck", "throat", "mouth", "tongue", "nose",
+    "stomach", "belly", "knee", "elbow", "shoulder", "hip",
+    # ── Clinical roles / places ───────────────────────────────────────────────
+    "doctor", "doctors", "nurse", "nurses", "cardiologist", "patient", "patients",
+    "hospital", "clinic", "pharmacy", "emergency room", "emergency",
+    "advice line", "nurse advice line", "patient portal",
+    # ── Clinical plain nouns ──────────────────────────────────────────────────
+    "medication", "medications", "medicine", "medicines", "drug", "drugs",
+    "prescription", "supplement", "supplements", "cream", "creams",
+    "pill", "pills", "tablet", "tablets", "capsule", "capsules",
+    "blood thinners", "blood thinner",
+    "discharge", "discharge papers",
+    "appointment", "follow-up", "follow-up appointment", "visit",
+    "test", "tests", "testing", "result", "results",
+    "list", "written list",
+    "video", "two-minute video",
+    "goal", "goals",
+    "number", "numbers",
+    # ── Symptoms in plain language ────────────────────────────────────────────
+    "swelling", "cough", "dry cough", "pain", "ache",
+    "faint", "dizzy", "dizziness", "nausea", "fatigue",
+    "symptoms", "symptom",
+    # ── Actions / verbs ───────────────────────────────────────────────────────
+    "report", "stop", "stopping", "take", "taking", "call", "watch", "check",
+    "ask", "explain", "bring", "avoid", "use", "apply",
+    "log", "log into",
+    "interact", "interacts",
+    # ── Qualifiers / generic descriptors ─────────────────────────────────────
+    "early", "new", "current", "currently", "written", "online",
+    "standing", "missing", "eluting",
+    # ── Miscellaneous common fragments ────────────────────────────────────────
+    "cardiac rehab", "rehab",
+    "own words",
+    "next visit",
+    "drug-eluting stent", "stent",
+    "clot", "clots", "clotting",
+    "garlic capsules", "garlic",
+    "st. john's wort", "john's wort",
+})
+
+# Pre-compiled regex for ordinals and pure-numeric tokens
+_ORDINAL_RE = re.compile(r'^\d+(?:st|nd|rd|th)?$', re.IGNORECASE)
+
+
+def _is_plain_english_ner(span_text: str) -> bool:
+    """
+    Return True if this NER span is a plain English word/phrase that should
+    NOT be presented as medical jargon to a lay reader.
+
+    Checks:
+      1. Exact match (case-insensitive) against the stopword set.
+      2. All-numeric or ordinal token (e.g. "14", "2nd", "40%").
+      3. Very short tokens (≤ 3 chars) — almost always not meaningful jargon.
+      4. High wordfreq Zipf score (≥ 5.0) — extremely common English word.
+    """
+    low = span_text.strip().lower()
+
+    # 1. Exact stopword match
+    if low in _NER_PLAIN_ENGLISH_STOPWORDS:
+        return True
+
+    # 2. Numeric / ordinal
+    # Strip trailing punctuation and % signs before checking
+    stripped = low.rstrip(".,;:%").strip()
+    if _ORDINAL_RE.match(stripped):
+        return True
+    if stripped.replace(".", "").replace(",", "").isdigit():
+        return True
+
+    # 3. Very short (catches "mg", "dL", single letters, etc.)
+    if len(low.replace(" ", "")) <= 3:
+        return True
+
+    # 4. High-frequency common word (wordfreq)
+    if _WORDFREQ_AVAILABLE:
+        try:
+            if _wordfreq.zipf_frequency(low, "en") >= 5.0:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+# =============================================================================
+# JARGON DETECTION — Layer 3 (Morphology)
+# =============================================================================
+_MEDICAL_SUFFIX = re.compile(
+    r"\b\w+(?:"
+    r"itis|osis|emia|uria|algia|trophy|plasia|genesis|lysis|penia"
+    r"|megaly|stenosis|sclerosis|spasm|plegia|paresis|philia|phobia"
+    r"|ectomy|plasty|otomy|oscopy|ostomy|pexy|rraphy|desis"
+    r"|ology|opathy|iatry|iatrics|graphy|gram|meter|scopy"
+    r"|mycin|cillin|oxacin|olol|pril|sartan|statin|mab|zumab|ximab|kinib"
+    r"|vir|tide|parin|azole|dazole|oxazole|thiazole"
+    r"|carcinoma|sarcoma|lymphoma|leukemia|blastoma|cytoma|adenoma"
+    r"|cytosis|cytopenia|globin|globulin"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_MEDICAL_PREFIX = re.compile(
+    r"\b(?:"
+    r"hyper|hypo|tachy|brady|poly|oligo|macro|micro|neo|anti|contra"
+    r"|intra|inter|trans|supra|sub|peri|para|endo|exo|hemo|haemo"
+    r"|cardio|neuro|hepato|nephro|gastro|entero|dermato|onco|immuno"
+    r"|osteo|arthro|myo|angio|lympho|pneumo|pulmo|thrombo|cyto|fibro"
+    r")\w{3,}\b",
+    re.IGNORECASE,
+)
+
+# =============================================================================
+# JARGON DETECTION — Layer 2 (Lexicon)
+# =============================================================================
+MEDICAL_LEXICON = [
+    "myocardial infarction", "heart attack", "atrial fibrillation",
+    "heart failure", "cardiac arrest", "coronary artery disease",
+    "type 1 diabetes", "type 2 diabetes", "diabetes mellitus",
+    "hypertension", "hyperlipidemia", "dyslipidemia", "hypercholesterolemia",
+    "chronic kidney disease", "acute kidney injury", "renal failure",
+    "chronic obstructive pulmonary disease", "COPD", "asthma", "pneumonia",
+    "tuberculosis", "sepsis", "septicemia", "bacteremia",
+    "stroke", "ischemic stroke", "hemorrhagic stroke", "transient ischemic attack",
+    "deep vein thrombosis", "pulmonary embolism",
+    "Alzheimer disease", "Parkinson disease", "multiple sclerosis",
+    "epilepsy", "seizure disorder",
+    "rheumatoid arthritis", "osteoarthritis", "systemic lupus erythematosus",
+    "celiac disease", "Crohn disease", "ulcerative colitis",
+    "hepatitis A", "hepatitis B", "hepatitis C", "cirrhosis", "liver failure",
+    "HIV", "AIDS", "human immunodeficiency virus",
+    "breast cancer", "lung cancer", "colorectal cancer", "prostate cancer",
+    "melanoma", "leukemia", "lymphoma", "glioblastoma",
+    "anemia", "iron deficiency anemia", "sickle cell disease",
+    "hyperthyroidism", "hypothyroidism", "Graves disease", "Hashimoto thyroiditis",
+    "polycystic ovary syndrome", "PCOS", "endometriosis", "fibromyalgia",
+    "anxiety disorder", "major depressive disorder", "bipolar disorder",
+    "schizophrenia", "post-traumatic stress disorder", "PTSD",
+    "autism spectrum disorder", "attention deficit hyperactivity disorder", "ADHD",
+    "myocardium", "pericardium", "endocardium", "epicardium",
+    "aorta", "ventricle", "atrium", "mitral valve", "tricuspid valve",
+    "alveoli", "bronchiole", "trachea", "pleura", "diaphragm",
+    "glomerulus", "nephron", "renal tubule", "ureter", "urethra",
+    "synapse", "axon", "dendrite", "neurotransmitter", "cerebellum",
+    "hypothalamus", "hippocampus", "amygdala", "prefrontal cortex",
+    "pancreas", "liver", "gallbladder", "bile duct", "duodenum",
+    "jejunum", "ileum", "colon", "rectum", "peritoneum",
+    "femur", "tibia", "fibula", "patella", "humerus", "radius", "ulna",
+    "lymph node", "spleen", "thymus", "bone marrow",
+    "adrenal gland", "thyroid gland", "parathyroid gland", "pituitary gland",
+    "metformin", "insulin", "glipizide", "sitagliptin", "empagliflozin",
+    "lisinopril", "ramipril", "enalapril", "amlodipine", "nifedipine",
+    "atorvastatin", "rosuvastatin", "simvastatin", "pravastatin",
+    "metoprolol", "carvedilol", "bisoprolol", "atenolol",
+    "warfarin", "rivaroxaban", "apixaban", "dabigatran", "heparin",
+    "aspirin", "clopidogrel", "ticagrelor",
+    "amoxicillin", "azithromycin", "ciprofloxacin", "doxycycline",
+    "vancomycin", "meropenem", "piperacillin", "tazobactam",
+    "prednisone", "dexamethasone", "hydrocortisone", "methylprednisolone",
+    "ibuprofen", "naproxen", "diclofenac", "celecoxib",
+    "acetaminophen", "paracetamol", "tramadol", "morphine", "oxycodone",
+    "levothyroxine", "methimazole", "propylthiouracil",
+    "omeprazole", "pantoprazole", "ranitidine", "ondansetron",
+    "fluoxetine", "sertraline", "escitalopram", "venlafaxine", "duloxetine",
+    "olanzapine", "risperidone", "quetiapine", "haloperidol",
+    "lorazepam", "diazepam", "alprazolam", "clonazepam",
+    "albuterol", "salbutamol", "salmeterol", "tiotropium", "budesonide",
+    "adalimumab", "infliximab", "rituximab", "trastuzumab", "bevacizumab",
+    "pembrolizumab", "nivolumab", "ipilimumab",
+    "electrocardiogram", "echocardiogram", "angiography", "angioplasty",
+    "coronary bypass", "percutaneous coronary intervention",
+    "computed tomography", "magnetic resonance imaging", "MRI", "CT scan",
+    "positron emission tomography", "PET scan", "ultrasound", "sonography",
+    "endoscopy", "colonoscopy", "bronchoscopy", "laparoscopy",
+    "biopsy", "fine needle aspiration", "lumbar puncture", "spinal tap",
+    "hemodialysis", "peritoneal dialysis",
+    "mechanical ventilation", "intubation", "tracheostomy",
+    "chemotherapy", "radiotherapy", "immunotherapy", "targeted therapy",
+    "bone marrow transplant", "stem cell transplant",
+    "complete blood count", "CBC", "metabolic panel", "lipid panel",
+    "hemoglobin A1c", "HbA1c", "prothrombin time", "INR",
+    "creatinine", "eGFR", "troponin", "BNP", "NT-proBNP",
+    "C-reactive protein", "erythrocyte sedimentation rate", "ESR",
+    "polymerase chain reaction", "PCR", "enzyme-linked immunosorbent assay", "ELISA",
+    "prognosis", "etiology", "pathophysiology", "comorbidity", "contraindication",
+    "pharmacokinetics", "pharmacodynamics", "bioavailability", "half-life",
+    "adverse event", "adverse effect", "side effect", "iatrogenic",
+    "randomized controlled trial", "meta-analysis", "systematic review",
+    "confidence interval", "odds ratio", "relative risk", "hazard ratio",
+    "placebo", "double-blind", "intention-to-treat", "per-protocol",
+    "incidence", "prevalence", "sensitivity", "specificity",
+    "positive predictive value", "negative predictive value",
+    "number needed to treat", "number needed to harm",
+    # ── Extra terms relevant to the example discharge text ────────────────────
+    "anterior STEMI", "STEMI", "drug-eluting stent",
+    "ejection fraction", "LDL cholesterol", "transthoracic echocardiogram",
+    "metoprolol succinate", "pharmacogenomic testing",
+    "NSAIDs", "NSAID", "PPIs", "PPI",
+    "antiplatelet", "antiplatelet drugs",
+    "CYP2C19", "liver enzyme",
+]
+
+_PHRASE_MATCHER = PhraseMatcher(nlp.vocab, attr="LOWER")
+_PHRASE_MATCHER.add("MEDICAL_JARGON", [nlp.make_doc(t) for t in MEDICAL_LEXICON])
+
+_SYLLABLE_THRESHOLD = 4
+
+# =============================================================================
+# SYLLABLE FILTER
+# =============================================================================
+_SYLLABLE_STOPWORDS = frozenset({
+    "immediately", "understand", "understanding", "information",
+    "appropriate", "approximately", "community", "particularly",
+    "individual", "individuals", "effectively", "available",
+    "especially", "environment", "opportunity", "relationship",
+    "experience", "important", "associated", "organization",
+    "communication", "development", "education", "evaluation",
+    "responsibility", "administration", "government", "university",
+    "international", "management", "significant", "significantly",
+    "consideration", "necessary", "majority", "professional",
+    "different", "activity", "activities", "possible", "population",
+    "traditional", "additional", "everything", "following",
+    "yourself", "although", "however", "whatever", "another",
+    "together", "continue", "everything", "everybody", "everywhere",
+    "interesting", "understanding", "unfortunately",
+    "unbelievable", "uncomfortable", "independent",
+    "immediately", "previously", "ultimately", "absolutely",
+    "definitely", "completely", "relatively", "apparently",
+    "incredibly", "certainly", "generally", "naturally",
+    "obviously", "probably", "literally", "basically",
+    "actually", "recently", "currently", "typically",
+    "regularly", "directly", "perfectly", "properly",
+    "quickly", "carefully", "clearly", "simply",
+    # Additional plain-language words that are polysyllabic
+    "appointment", "medication", "medications", "prescription",
+    "supplement", "supplements", "instructions", "information",
+    "including", "everything", "something", "anything",
+    "important", "carefully", "emergency",
+})
+
+_ZIPF_JARGON_THRESHOLD = 4.5
+
+
+def _is_common_word(token_text: str) -> bool:
+    low = token_text.lower()
+    if low in _SYLLABLE_STOPWORDS:
+        return True
+    if _WORDFREQ_AVAILABLE:
+        try:
+            return _wordfreq.zipf_frequency(low, "en") >= _ZIPF_JARGON_THRESHOLD
+        except Exception:
+            pass
+    return False
+
+
+# =============================================================================
+# SPAN MERGER
+# =============================================================================
+def _merge_consecutive_spans(
+    spans: dict[tuple[int, int], str],
+    text: str,
+) -> dict[tuple[int, int], str]:
+    if not spans:
+        return spans
+    sorted_spans = sorted(spans.items(), key=lambda kv: kv[0][0])
+    merged: list[tuple[tuple[int, int], str]] = []
+    cur_start, cur_end = sorted_spans[0][0]
+    cur_layer = sorted_spans[0][1]
+    for (start, end), layer in sorted_spans[1:]:
+        gap = text[cur_end:start]
+        if layer == cur_layer and gap.strip() == "":
+            cur_end = end
+        else:
+            merged.append(((cur_start, cur_end), cur_layer))
+            cur_start, cur_end, cur_layer = start, end, layer
+    merged.append(((cur_start, cur_end), cur_layer))
+    return dict(merged)
+
+
+# =============================================================================
+# SHARED JARGON DETECTION ENGINE  (v3.1)
+# =============================================================================
+def _detect_jargon_spans(doc) -> dict[tuple[int, int], str]:
+    n        = len(doc.text)
+    assigned = [False] * n
+    spans: dict[tuple[int, int], str] = {}
+
+    def _mark(start: int, end: int, layer: str) -> bool:
+        if not (0 <= start < end <= n):
+            return False
+        if any(assigned[i] for i in range(start, end)):
+            return False
+        spans[(start, end)] = layer
+        for i in range(start, end):
+            assigned[i] = True
+        return True
+
+    # ── Layer 1: NER ──────────────────────────────────────────────────────────
+    for ent in doc.ents:
+        if ent.label_ not in MEDICAL_ENTITY_LABELS:
+            continue
+        # ▶ NEW: reject if the span text is plain English
+        if _is_plain_english_ner(ent.text):
+            continue
+        _mark(ent.start_char, ent.end_char, "NER")
+
+    # ── Layer 2: Curated Lexicon ───────────────────────────────────────────────
+    for _, s_tok, e_tok in _PHRASE_MATCHER(doc):
+        sp = doc[s_tok:e_tok]
+        _mark(sp.start_char, sp.end_char, "lexicon")
+
+    # ── Layer 3: Morphology ───────────────────────────────────────────────────
+    for pat in (_MEDICAL_SUFFIX, _MEDICAL_PREFIX):
+        for m in pat.finditer(doc.text):
+            _mark(m.start(), m.end(), "morphology")
+
+    # ── Layer 4: Syllable count ───────────────────────────────────────────────
+    for token in doc:
+        if (
+            token.is_alpha
+            and len(token.text) >= 7
+            and not token.is_stop
+            and not _is_common_word(token.text)
+            and textstat.syllable_count(token.text) >= _SYLLABLE_THRESHOLD
+        ):
+            _mark(token.idx, token.idx + len(token.text), "syllable")
+
+    return _merge_consecutive_spans(spans, doc.text)
+
+
+# =============================================================================
+# BVAE
+# =============================================================================
 class BVAE(nn.Module):
     def __init__(self, input_dim=5, latent_dim=16, dropout_p=0.2):
         super().__init__()
         self.latent_dim = latent_dim
-        self.beta = 1.0 if latent_dim <= 8 else 0.5
+        self.beta  = 1.0 if latent_dim <= 8 else 0.5
         self.enc1  = nn.Linear(input_dim, 32)
         self.drop1 = nn.Dropout(dropout_p)
         self.enc2  = nn.Linear(32, 32)
@@ -128,7 +542,10 @@ class BVAE(nn.Module):
         z = mu + torch.exp(0.5 * lv) * torch.randn_like(mu)
         return self.decode(z), mu, lv
 
-# ─── Load model ───────────────────────────────────────────────────────────────
+
+# =============================================================================
+# Load model
+# =============================================================================
 print("Loading model …")
 ckpt            = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
 LATENT_DIM      = ckpt["latent_dim"]
@@ -142,36 +559,47 @@ model = BVAE(input_dim=5, latent_dim=LATENT_DIM).to(DEVICE)
 model.load_state_dict(ckpt["model_state"])
 print("Model loaded ✓")
 
-def scale(x): return (x - scaler_mean) / scaler_scale
 
-# ─── Text pipeline ────────────────────────────────────────────────────────────
+def scale(x):
+    return (x - scaler_mean) / scaler_scale
+
+
+# =============================================================================
+# Text pipeline
+# =============================================================================
 _HTML  = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"\s{2,}")
 _NOISE = re.compile(r"[^\w\s\.,;:!?()\-\'\"/%°+]")
 
+
 def clean_text(text):
     text = _HTML.sub(" ", text)
-    text = text.replace("\r\n"," ").replace("\n"," ").replace("\t"," ")
+    text = text.replace("\r\n", " ").replace("\n", " ").replace("\t", " ")
     text = _NOISE.sub(" ", text)
     return _SPACE.sub(" ", text).strip().lower()
 
+
 def extract_features(text):
-    """
-    Extract feature dictionary using regex + POS patterns.
-    Delegates to health_literacy_regex_patterns.extract_all_features().
-    Output keys are identical to the previous implementation so
-    aggregate_scores() and all downstream code remain unchanged.
-    """
     return extract_all_features(text)
 
+
 def aggregate_scores(feat):
-    def m(*keys): return float(np.mean([feat.get(k, 0) for k in keys]))
-    fhl  = m("readability_score","avg_sentence_length","avg_clauses_per_sentence","medical_entity_count","medical_entity_density","unique_medical_terms","hedging_score","confidence_score")
-    chl  = m("question_count","question_ratio","conditional_expression_count","modal_verb_count","modal_verb_density","context_marker_count","context_provided")
-    crhl = m("causal_connective_count","contrastive_connective_count","evidence_reference_count","multiple_options_count")
-    dhl  = m("online_reference_count","credible_source_count","cross_reference_count","information_interpretation_score")
-    ehl  = m("concreteness_score","lexical_diversity","present_verb_count","present_verb_ratio","determiner_count","determiner_ratio","adjective_count","adjective_ratio","function_word_count","function_word_ratio")
+    def m(*keys):
+        return float(np.mean([feat.get(k, 0) for k in keys]))
+    fhl  = m("readability_score","avg_sentence_length","avg_clauses_per_sentence",
+             "medical_entity_count","medical_entity_density","unique_medical_terms",
+             "hedging_score","confidence_score")
+    chl  = m("question_count","question_ratio","conditional_expression_count",
+             "modal_verb_count","modal_verb_density","context_marker_count","context_provided")
+    crhl = m("causal_connective_count","contrastive_connective_count",
+             "evidence_reference_count","multiple_options_count")
+    dhl  = m("online_reference_count","credible_source_count",
+             "cross_reference_count","information_interpretation_score")
+    ehl  = m("concreteness_score","lexical_diversity","present_verb_count",
+             "present_verb_ratio","determiner_count","determiner_ratio",
+             "adjective_count","adjective_ratio","function_word_count","function_word_ratio")
     return np.array([[fhl, chl, crhl, dhl, ehl]], dtype=np.float32)
+
 
 def assign_profile(f1v, f2v, f3v):
     if abs(f2v) > 1.0 and abs(f3v) <= 0.8: return "Specialized", "Digitally-Specialized"
@@ -179,16 +607,19 @@ def assign_profile(f1v, f2v, f3v):
     if f1v > f1_median:                      return "Balanced", ""
     return "Transitional", ""
 
+
 def map_hl_level(f1v, f2v):
-    if   f1v < hl_threshold["low"]:          level = "Low"
-    elif f1v < hl_threshold["basic"]:        level = "Basic"
-    elif f1v < hl_threshold["intermediate"]: level = "Intermediate"
-    else:                                     level = "High"
+    if   f1v < hl_threshold["low"]:           level = "Low"
+    elif f1v < hl_threshold["basic"]:         level = "Basic"
+    elif f1v < hl_threshold["intermediate"]:  level = "Intermediate"
+    else:                                      level = "High"
     if f2v < -1.2 and f1v < 0.25:
-        order = ["Low","Basic","Intermediate","High"]
+        order = ["Low", "Basic", "Intermediate", "High"]
         idx = order.index(level)
-        if idx > 1: level = order[idx - 1]
+        if idx > 1:
+            level = order[idx - 1]
     return level
+
 
 def suitability(f1v, f2v, f3v):
     centroids = {
@@ -201,12 +632,13 @@ def suitability(f1v, f2v, f3v):
     tot = sum(raw.values())
     return {p: round(s / tot * 100, 1) for p, s in raw.items()}
 
+
 def analyse(text):
-    cleaned  = clean_text(text)
-    feat     = extract_features(cleaned)
-    scores   = aggregate_scores(feat)
-    x_norm   = scale(scores).astype(np.float32)
-    x_t      = torch.tensor(x_norm, dtype=torch.float32).to(DEVICE)
+    cleaned = clean_text(text)
+    feat    = extract_features(cleaned)
+    scores  = aggregate_scores(feat)
+    x_norm  = scale(scores).astype(np.float32)
+    x_t     = torch.tensor(x_norm, dtype=torch.float32).to(DEVICE)
     model.train()
     recons = []
     with torch.no_grad():
@@ -230,7 +662,10 @@ def analyse(text):
                 f1=round(f1v, 4), f2=round(f2v, 4), f3=round(f3v, 4),
                 sigma=round(sigma, 4), suitability=suit, raw_scores=raw_scores)
 
-# ─── Guidance ─────────────────────────────────────────────────────────────────
+
+# =============================================================================
+# Guidance
+# =============================================================================
 GUIDANCE = {
     ("Transitional","Balanced"): {
         "elevate": ["Use more medical terminology and disease/drug names","Add causal reasoning (because, therefore, as a result)","Include personal health context (diagnosis, duration, treatment)","Reference credible sources (CDC, NHS, clinical guidelines)","Use contrastive connectives (however, although, despite)"],
@@ -258,191 +693,55 @@ GUIDANCE = {
     },
 }
 
+
 def get_guidance(current, target):
     return GUIDANCE.get((current, target), {
         "elevate": ["Improve overall medical vocabulary and sentence structure","Add more contextual reasoning and evidence references"],
         "reduce":  ["Reduce elements that push toward the current profile"],
     })
-# ─── ClarityConsensus-Agents (lightweight, reuses spaCy + textstat) ───────────
-# Mirrors the MedEval-Agents framework:
-# Jargon(0.40) + Explanation(0.30) + Fluency(0.15) + Coherence(0.15)
+
+
+# =============================================================================
+# ClarityConsensus
+# =============================================================================
+_EXPLANATION_CUES = re.compile(
+    r'\(([^)]{5,})\)'
+    r'|,?\s*(also known as|defined as|refers to|meaning|i\.e\.)\s',
+    re.IGNORECASE,
+)
+_EXPLANATION_WINDOW = 120
+
 
 def clarity_consensus(text: str) -> dict:
-    """
-    Lightweight ClarityConsensus score replicating the multi-agent framework.
-
-    Agents:
-      JargonAgent      — ratio of medical terms that lack a nearby explanation
-      ExplanationAgent — coverage of parenthetical / appositive definitions
-      FluencyAgent     — Flesch Reading Ease normalised to [0,1]
-      CoherenceAgent   — mean cosine similarity between consecutive spaCy sentence vectors
-    """
     doc   = nlp(text)
     sents = list(doc.sents)
 
-    # ── Jargon helpers ────────────────────────────────────────────────────────
-
-    import re
-
-    JARGON_MORPHOLOGY = re.compile(
-        r'\b\w*(?:'
-        
-        # --- COMMON MEDICAL SUFFIXES ---
-        r'ology|onomy|ography|ometry|'
-        r'itis|osis|iasis|asis|oma|omas|omata|'
-        r'emia|uria|algia|dynia|pathy|plegia|paresis|'
-        r'trophy|genesis|lysis|rrhea|rrhage|rrhagia|'
-        r'sclerosis|stenosis|malacia|megaly|'
-        r'penia|cytosis|phasia|phagia|phonia|'
-        r'blastoma|carcinoma|sarcoma|adenoma|fibroma|'
-        
-        # --- SURGICAL / PROCEDURAL ---
-        r'ectomy|ostomy|otomy|plasty|scopy|oscopy|'
-        r'graphy|gram|meter|metry|therapy|desis|pexy|'
-        r'centesis|tripsy|rrhaphy|lysis|'
-        
-        # --- CELL / BIOLOGY ---
-        r'cyte|blast|clast|plasm|some|gen|genesis|'
-        r'phage|phil|phobe|kine|taxis|'
-        
-        # --- PREFIXES (CONDITIONS / QUANTITIES) ---
-        r'hyper|hypo|normo|dys|eu|'
-        r'brady|tachy|poly|oligo|pan|'
-        r'neo|pseudo|auto|hetero|homo|'
-        r'inter|intra|extra|sub|super|'
-        r'pre|post|peri|endo|ecto|'
-        r'anti|pro|contra|'
-        
-        # --- ORGANS / SYSTEM ROOTS ---
-        r'cardio|neuro|hepato|nephro|gastro|dermato|'
-        r'osteo|myo|angio|vasculo|pulmo|pneumo|'
-        r'encephalo|ophthalmo|otol|laryngo|'
-        r'rhino|stomato|procto|colo|entero|'
-        r'spleno|thyro|adreno|hystero|orchido|'
-        
-        # --- BIOCHEMISTRY / SUBSTANCES ---
-        r'lipid|glyco|gluco|proteo|nucleo|'
-        r'enzym|hormon|toxin|acid|base|'
-        
-        # --- MICROBIOLOGY / PATHOGENS ---
-        r'bacter|virus|viral|fung|myco|parasite|helminth|'
-        
-        # --- GENERAL SCIENTIFIC ---
-        r'logy|nomy|ics|iatry|iatric|genic|genic|genous|'
-        
-        r')\w*\b',
-        re.IGNORECASE
-    )
-
-    import re
-
-    EXPLANATION_CUES = re.compile(
-        r'(?:'
-        
-        # --- PARENTHESIS (explanations, clarifications) ---
-        r'\(([^)]{5,})\)'
-        
-        r'|'
-        
-        # --- CLASSIC DEFINITION PHRASES ---
-        r',?\s*(?:'
-        r'also known as|aka|'
-        r'defined as|is defined as|can be defined as|'
-        r'refers to|is referring to|'
-        r'means|meaning|'
-        r'i\.e\.|e\.g\.|'
-        r'in other words|that is|that is to say|'
-        r'which is|which means|which refers to|'
-        r'what we call|known as|called|termed|'
-        r')\s'
-        
-        r'|'
-        
-        # --- APPOSITIONS (noun phrase explanations) ---
-        r',\s*(?:a|an|the)\s+[^,]{3,},'
-        
-        r'|'
-        
-        # --- DASH / COLON EXPLANATIONS ---
-        r'\s*[-–—:]\s*(?:'
-        r'a|an|the|'
-        r'meaning|defined as|refers to|'
-        r')?\s*[^.,;]{3,}'
-        
-        r'|'
-        
-        # --- VERB-BASED EXPLANATIONS ---
-        r'\b(?:'
-        r'is|are|was|were|'
-        r'means|denotes|indicates|describes|represents|'
-        r'consists of|comprises|involves|'
-        r')\s+(?:a|an|the)?\s*[^.,;]{3,}'
-        
-        r'|'
-        
-        # --- SIMPLIFICATION / PATIENT-FRIENDLY ---
-        r',?\s*(?:'
-        r'simply put|put simply|basically|'
-        r'in simple terms|to put it simply|'
-        r')\s'
-        
-        r')',
-        re.IGNORECASE
-    )
-
-    def _is_rare_long(token) -> bool:
-        return (
-            token.is_alpha
-            and not token.is_stop
-            and len(token.text) >= 8
-            and token.prob < -13.0
-        )
-
-    def _detect_jargon_tokens(doc, text: str) -> list:
-        jargon_spans = {}
-
-        for m in JARGON_MORPHOLOGY.finditer(text):
-            word = m.group(0)
-            if len(word) < 6:
-                continue
-            jargon_spans[m.start()] = (word, m.start(), m.end())
-
-        for token in doc:
-            if _is_rare_long(token):
-                if token.idx not in jargon_spans:
-                    jargon_spans[token.idx] = (token.text, token.idx, token.idx + len(token.text))
-
-        return list(jargon_spans.values())
-
-    # ── Agent 1: Jargon ───────────────────────────────────────────────────────
-    jargon_hits = _detect_jargon_tokens(doc, text)
-    n_terms     = len(jargon_hits)
+    jargon_spans = _detect_jargon_spans(doc)
+    n_terms      = len(jargon_spans)
 
     explained = 0
-    for (word, start_char, end_char) in jargon_hits:
-        window = text[end_char: end_char + 120]
-        if EXPLANATION_CUES.search(window):
+    for (_, end), _ in jargon_spans.items():
+        if _EXPLANATION_CUES.search(text[end: end + _EXPLANATION_WINDOW]):
             explained += 1
 
-    unexplained  = max(n_terms - explained, 0)
-    jargon_score = 1.0 - min(1.0, unexplained / max(n_terms, 1))
-    jargon_raw   = n_terms / max(len([t for t in doc if not t.is_space]), 1)
-
-    # ── Agent 2: Explanation coverage ─────────────────────────────────────────
+    unexplained       = max(n_terms - explained, 0)
+    jargon_score      = 1.0 - min(1.0, unexplained / max(n_terms, 1))
     explanation_score = explained / max(n_terms, 1) if n_terms > 0 else 1.0
 
-    # ── Agent 3: Fluency — Flesch Reading Ease → [0,1] ────────────────────────
+    layer_counts: dict[str, int] = {}
+    for layer in jargon_spans.values():
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
+
     fre           = textstat.flesch_reading_ease(text)
     fluency_score = float(min(1.0, max(0.0, fre / 100.0)))
 
-    # ── Agent 4: Coherence — mean pairwise cosine between consecutive sentences
-    coherence_score = 1.0
+    coherence_score     = 1.0
     flagged_transitions = []
     if len(sents) >= 2:
         sims = []
         for s1, s2 in zip(sents[:-1], sents[1:]):
-            v1 = s1.vector; v2 = s2.vector
-            n1 = np.linalg.norm(v1); n2 = np.linalg.norm(v2)
+            v1, v2 = s1.vector, s2.vector
+            n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
             if n1 > 0 and n2 > 0:
                 sim = float(np.dot(v1, v2) / (n1 * n2))
                 sims.append(sim)
@@ -450,7 +749,6 @@ def clarity_consensus(text: str) -> dict:
                     flagged_transitions.append((str(s1)[:60], str(s2)[:60], round(sim, 3)))
         coherence_score = float(np.mean(sims)) if sims else 1.0
 
-    # ── Weighted final score ───────────────────────────────────────────────────
     W_J, W_E, W_F, W_C = 0.40, 0.30, 0.15, 0.15
     final = W_J * jargon_score + W_E * explanation_score + W_F * fluency_score + W_C * coherence_score
 
@@ -463,35 +761,30 @@ def clarity_consensus(text: str) -> dict:
         "n_terms":             n_terms,
         "n_explained":         explained,
         "fre":                 round(fre, 2),
+        "layer_counts":        layer_counts,
         "flagged_transitions": flagged_transitions,
     }
+
+
+# =============================================================================
+# Text annotation — HL dimensions
+# =============================================================================
 def annotate_text(text: str):
-    """
-    Scans the text for HL dimension markers and returns a list of
-    (segment, dim_or_None) tuples for rendering as coloured spans.
-    Priority: CRHL > DHL > CHL > FHL  (most specific first).
-    Uses regex patterns from HealthLiteracyPatterns for improved coverage.
-    """
     lower  = text.lower()
     n      = len(text)
-    labels = [None] * n   # character-level dimension label
-
-    P = HealthLiteracyPatterns
+    labels = [None] * n
+    P      = HealthLiteracyPatterns
 
     dim_patterns = [
-        ("CRHL", P.CAUSAL_PATTERNS + P.CONTRASTIVE_PATTERNS
-                 + P.EVIDENCE_PATTERNS + P.OPTIONS_PATTERNS),
-        ("DHL",  P.TRUSTED_SOURCES_PATTERNS + [P.URL_PATTERN]
-                 + P.CROSS_REF_PATTERNS),
+        ("CRHL", P.CAUSAL_PATTERNS + P.CONTRASTIVE_PATTERNS + P.EVIDENCE_PATTERNS + P.OPTIONS_PATTERNS),
+        ("DHL",  P.TRUSTED_SOURCES_PATTERNS + [P.URL_PATTERN] + P.CROSS_REF_PATTERNS),
         ("CHL",  P.CONTEXT_PATTERNS + P.CONDITIONAL_PATTERNS),
         ("FHL",  P.HEDGING_PATTERNS + P.CERTAINTY_PATTERNS),
     ]
-
     for dim, patterns in dim_patterns:
         for pat_str in patterns:
             try:
-                pattern = re.compile(pat_str, re.IGNORECASE)
-                for m in pattern.finditer(lower):
+                for m in re.compile(pat_str, re.IGNORECASE).finditer(lower):
                     s, e = m.start(), m.end()
                     if all(labels[i] is None for i in range(s, e)):
                         for i in range(s, e):
@@ -499,7 +792,6 @@ def annotate_text(text: str):
             except re.error:
                 continue
 
-    # group consecutive chars with the same label into segments
     segments, i = [], 0
     while i < n:
         label = labels[i]
@@ -508,22 +800,25 @@ def annotate_text(text: str):
             j += 1
         segments.append((text[i:j], label))
         i = j
-
     return segments
+
+
+# =============================================================================
+# Text annotation — ClarityConsensus
+# =============================================================================
 def annotate_clarity(text: str) -> list:
     doc    = nlp(text)
     n      = len(text)
     labels = [None] * n
 
-    # ── Fluency ──────────────────────────────────────────────────────────────
     for token in doc:
-        if token.is_alpha and len(token.text) >= 7:
+        if token.is_alpha and len(token.text) >= 6:
             if textstat.syllable_count(token.text) >= 3:
                 for i in range(token.idx, min(token.idx + len(token.text), n)):
-                    labels[i] = "Fluency"
+                    if labels[i] is None:
+                        labels[i] = "Fluency"
 
-    # ── Coherence ─────────────────────────────────────────────────────────────
-    COHERENCE_MARKERS = {
+    _COHERENCE_MARKERS = {
         "however","although","though","yet","nevertheless","furthermore",
         "moreover","therefore","thus","hence","consequently","in contrast",
         "on the other hand","in addition","additionally","despite","whereas",
@@ -531,29 +826,25 @@ def annotate_clarity(text: str) -> list:
         "that is","in other words","specifically","notably","importantly",
     }
     lower = text.lower()
-    for marker in sorted(COHERENCE_MARKERS, key=len, reverse=True):
-        pattern = re.compile(r'\b' + re.escape(marker) + r'\b')
-        for m in pattern.finditer(lower):
+    for marker in sorted(_COHERENCE_MARKERS, key=len, reverse=True):
+        for m in re.compile(r'\b' + re.escape(marker) + r'\b').finditer(lower):
             for i in range(m.start(), min(m.end(), n)):
                 labels[i] = "Coherence"
 
-    # ── Jargon ────────────────────────────────────────────────────────────────
-    for ent in doc.ents:
-        if ent.label_ in MEDICAL_ENTITY_LABELS:
-            for i in range(ent.start_char, min(ent.end_char, n)):
-                labels[i] = "Jargon"
-
-    # ── Explanation ───────────────────────────────────────────────────────────
-    EXPLANATION_CUES = re.compile(
+    _EXP = re.compile(
         r'\(([^)]{5,})\)'
         r'|,?\s*(also known as|defined as|refers to|meaning|i\.e\.)[^,\.;]{0,80}',
-        re.IGNORECASE
+        re.IGNORECASE,
     )
-    for m in EXPLANATION_CUES.finditer(text):
+    for m in _EXP.finditer(text):
         for i in range(m.start(), min(m.end(), n)):
             labels[i] = "Explanation"
 
-    # ── Segment ───────────────────────────────────────────────────────────────
+    jargon_spans = _detect_jargon_spans(doc)
+    for (start, end), layer in jargon_spans.items():
+        for i in range(start, min(end, n)):
+            labels[i] = f"Jargon-{layer}"
+
     segments, i = [], 0
     while i < n:
         label = labels[i]
@@ -562,64 +853,84 @@ def annotate_clarity(text: str) -> list:
             j += 1
         segments.append((text[i:j], label))
         i = j
+    return segments
 
-    return segments   # ← this line must be present and at function level
 
-# ─── DASH APP ─────────────────────────────────────────────────────────────────
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY],
-                title="HL Profile Dashboard")
+# =============================================================================
+# DASH APP  (unchanged from v3)
+# =============================================================================
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.DARKLY],
+    title="HL Profile Dashboard",
+)
 
-app.layout = dbc.Container(fluid=True, style={"background":"#0f172a","minHeight":"100vh","padding":"0"}, children=[
+app.layout = dbc.Container(
+    fluid=True,
+    style={"background":"#0f172a","minHeight":"100vh","padding":"0"},
+    children=[
+        html.Div(
+            style={"background":"linear-gradient(135deg,#1e293b 0%,#0f172a 100%)",
+                   "borderBottom":"1px solid #334155","padding":"24px 40px","marginBottom":"28px"},
+            children=[
+                html.H1("Health Literacy Profile Dashboard",
+                        style={"color":"#f1f5f9","fontFamily":"Georgia,serif","fontWeight":"700",
+                               "fontSize":"1.9rem","margin":"0","letterSpacing":"-0.5px"}),
+                html.P("Submit any health-related text to receive a full profile report and upgrade guidance.",
+                       style={"color":"#94a3b8","margin":"6px 0 0","fontSize":"0.9rem"}),
+            ],
+        ),
+        dbc.Container(
+            fluid=False,
+            style={"maxWidth":"1300px","padding":"0 24px"},
+            children=[
+                dbc.Card(
+                    style={"background":"#1e293b","border":"1px solid #334155",
+                           "borderRadius":"12px","marginBottom":"24px"},
+                    children=[dbc.CardBody([
+                        html.Label("Paste your health text below",
+                                   style={"color":"#94a3b8","fontSize":"0.85rem","fontWeight":"600",
+                                          "letterSpacing":"0.05em","textTransform":"uppercase",
+                                          "marginBottom":"10px","display":"block"}),
+                        dcc.Textarea(
+                            id="input-text",
+                            placeholder="e.g. I have type 2 diabetes and my doctor prescribed metformin 500 mg twice daily…",
+                            style={"width":"100%","height":"130px","background":"#0f172a","color":"#f1f5f9",
+                                   "border":"1px solid #475569","borderRadius":"8px","padding":"14px",
+                                   "fontSize":"0.95rem","fontFamily":"'Courier New',monospace","resize":"vertical"},
+                        ),
+                        html.Div(
+                            style={"display":"flex","justifyContent":"space-between",
+                                   "alignItems":"center","marginTop":"14px"},
+                            children=[
+                                html.Span(id="word-count", style={"color":"#64748b","fontSize":"0.82rem"}),
+                                dbc.Button("Analyse Text →", id="analyse-btn", n_clicks=0,
+                                           style={"background":"linear-gradient(135deg,#6366f1,#8b5cf6)",
+                                                  "border":"none","borderRadius":"8px","padding":"10px 28px",
+                                                  "fontWeight":"600","fontSize":"0.95rem"}),
+                            ],
+                        ),
+                    ])],
+                ),
+                dcc.Loading(id="loading", type="circle", color="#6366f1",
+                            children=[html.Div(id="results-area")]),
+            ],
+        ),
+    ],
+)
 
-    html.Div(style={"background":"linear-gradient(135deg,#1e293b 0%,#0f172a 100%)",
-                    "borderBottom":"1px solid #334155","padding":"24px 40px","marginBottom":"28px"}, children=[
-        html.H1("Health Literacy Profile Dashboard",
-                style={"color":"#f1f5f9","fontFamily":"Georgia,serif","fontWeight":"700",
-                       "fontSize":"1.9rem","margin":"0","letterSpacing":"-0.5px"}),
-        html.P("Submit any health-related text to receive a full profile report and upgrade guidance.",
-               style={"color":"#94a3b8","margin":"6px 0 0","fontSize":"0.9rem"}),
-    ]),
 
-    dbc.Container(fluid=False, style={"maxWidth":"1300px","padding":"0 24px"}, children=[
-        dbc.Card(style={"background":"#1e293b","border":"1px solid #334155",
-                        "borderRadius":"12px","marginBottom":"24px"}, children=[
-            dbc.CardBody([
-                html.Label("Paste your health text below",
-                           style={"color":"#94a3b8","fontSize":"0.85rem","fontWeight":"600",
-                                  "letterSpacing":"0.05em","textTransform":"uppercase",
-                                  "marginBottom":"10px","display":"block"}),
-                dcc.Textarea(id="input-text",
-                             placeholder="e.g.  I have type 2 diabetes and my doctor prescribed metformin 500mg twice daily…",
-                             style={"width":"100%","height":"130px","background":"#0f172a","color":"#f1f5f9",
-                                    "border":"1px solid #475569","borderRadius":"8px","padding":"14px",
-                                    "fontSize":"0.95rem","fontFamily":"'Courier New',monospace","resize":"vertical"}),
-                html.Div(style={"display":"flex","justifyContent":"space-between",
-                                "alignItems":"center","marginTop":"14px"}, children=[
-                    html.Span(id="word-count", style={"color":"#64748b","fontSize":"0.82rem"}),
-                    dbc.Button("Analyse Text →", id="analyse-btn", n_clicks=0,
-                               style={"background":"linear-gradient(135deg,#6366f1,#8b5cf6)",
-                                      "border":"none","borderRadius":"8px","padding":"10px 28px",
-                                      "fontWeight":"600","fontSize":"0.95rem"}),
-                ]),
-            ])
-        ]),
-        dcc.Loading(id="loading", type="circle", color="#6366f1", children=[
-            html.Div(id="results-area"),
-        ]),
-    ]),
-])
-
-# ── Word count ────────────────────────────────────────────────────────────────
 @app.callback(Output("word-count","children"), Input("input-text","value"))
 def update_wc(text):
-    if not text: return ""
+    if not text:
+        return ""
     return f"{len(text.split())} words"
 
-# ── Main analysis callback ─────────────────────────────────────────────────────
+
 @app.callback(
-    Output("results-area", "children"),
-    Input("analyse-btn", "n_clicks"),
-    State("input-text", "value"),
+    Output("results-area","children"),
+    Input("analyse-btn","n_clicks"),
+    State("input-text","value"),
     prevent_initial_call=True,
 )
 def run_analysis(n, text):
@@ -627,41 +938,37 @@ def run_analysis(n, text):
         return dbc.Alert("Please enter at least 20 characters of text.", color="warning")
 
     try:
-        r = analyse(text)
+        r       = analyse(text)
         clarity = clarity_consensus(text)
     except Exception as e:
         return dbc.Alert(f"Analysis error: {e}", color="danger")
 
-    profile    = r["profile"]
-    sub        = r["sub_type"]
-    hl         = r["hl_level"]
-    suit       = r["suitability"]
-    raw        = r["raw_scores"]
+    profile = r["profile"]
+    sub     = r["sub_type"]
+    hl      = r["hl_level"]
+    suit    = r["suitability"]
+    raw     = r["raw_scores"]
     f1, f2, f3 = r["f1"], r["f2"], r["f3"]
-    sigma      = r["sigma"]
-    flagged    = r["flagged"]
-    pcol       = PROFILE_COLOURS.get(str(profile).strip(), "#6366f1")
-    hlcol      = HL_COLOURS.get(hl, "#6366f1")
-    label      = profile + (f" · {sub}" if sub else "")
+    sigma   = r["sigma"]
+    flagged = r["flagged"]
+    pcol    = PROFILE_COLOURS.get(profile, "#6366f1")
+    hlcol   = HL_COLOURS.get(hl, "#6366f1")
+    label   = profile + (f" · {sub}" if sub else "")
 
-    # ── Hero ──
     hero = dbc.Row(style={"marginBottom":"20px"}, children=[
         dbc.Col(md=4, children=[
-            html.Div(style={"background":"#1e293b",
-                            "border":f"2px solid {pcol}",
+            html.Div(style={"background":"#1e293b","border":f"2px solid {pcol}",
                             "borderRadius":"12px","padding":"22px","height":"100%"}, children=[
                 html.P("ASSIGNED PROFILE",
                        style={"color":"#64748b","fontSize":"0.75rem","fontWeight":"700",
                               "letterSpacing":"0.1em","margin":"0 0 8px"}),
-                html.H2(label,
-                        style={"color":pcol,"fontFamily":"Georgia,serif","fontSize":"1.6rem",
-                               "fontWeight":"700","margin":"0 0 6px"}),
+                html.H2(label, style={"color":pcol,"fontFamily":"Georgia,serif","fontSize":"1.6rem",
+                                      "fontWeight":"700","margin":"0 0 6px"}),
                 html.Div(style={"display":"flex","gap":"10px","alignItems":"center","marginTop":"10px"}, children=[
                     html.Span(hl, style={"background":hlcol,"color":"#fff","borderRadius":"20px",
                                          "padding":"4px 14px","fontSize":"0.8rem","fontWeight":"700"}),
                     html.Span(f"σ = {sigma:.4f}", style={"color":"#94a3b8","fontSize":"0.82rem"}),
-                    html.Span("⚑ FLAGGED",
-                              style={"color":"#ef4444","fontSize":"0.8rem","fontWeight":"700"})
+                    html.Span("⚑ FLAGGED", style={"color":"#ef4444","fontSize":"0.8rem","fontWeight":"700"})
                     if flagged else html.Span(),
                 ]),
             ])
@@ -675,115 +982,119 @@ def run_analysis(n, text):
                 *[html.Div(style={"marginBottom":"10px"}, children=[
                     html.Div(style={"display":"flex","justifyContent":"space-between","marginBottom":"4px"}, children=[
                         html.Span(p, style={"color":"#e2e8f0","fontSize":"0.88rem","fontWeight":"600"}),
-                        html.Span(f"{suit[p]}%",
-                                  style={"color":PROFILE_COLOURS[p],"fontSize":"0.88rem","fontWeight":"700"}),
+                        html.Span(f"{suit[p]}%", style={"color":PROFILE_COLOURS[p],"fontSize":"0.88rem","fontWeight":"700"}),
                     ]),
                     html.Div(style={"background":"#0f172a","borderRadius":"4px","height":"8px","overflow":"hidden"}, children=[
                         html.Div(style={"width":f"{suit[p]}%","height":"100%",
-                                        "background":PROFILE_COLOURS[p],"borderRadius":"4px",
-                                        "transition":"width 0.8s ease"}),
+                                        "background":PROFILE_COLOURS[p],"borderRadius":"4px"}),
                     ]),
                 ]) for p in ["Balanced","Transitional","Specialized"]],
             ])
         ]),
     ])
-    # ── ClarityConsensus section ───────────────────────────────────────────────
-    def score_colour(v: float) -> str:
+
+    def score_colour(v):
         if v >= 0.80: return "#22c55e"
         if v >= 0.60: return "#f97316"
         return "#ef4444"
 
-    def score_bar(v: float, width: int = 28) -> str:
-        filled = int(round(v * width))
-        return "█" * filled + "░" * (width - filled)
+    final_col    = score_colour(clarity["final"])
+    layer_counts = clarity.get("layer_counts", {})
+
+    _LAYER_DISPLAY_ORDER = ["NER", "lexicon", "morphology", "syllable"]
+    layer_pill_row = html.Div(
+        style={"display":"flex","gap":"8px","flexWrap":"wrap","margin":"10px 0 4px"},
+        children=[
+            html.Span(
+                [
+                    html.Span(JARGON_LAYER_COLOURS[lyr]["badge"],
+                              style={"fontWeight":"800","marginRight":"4px",
+                                     "fontSize":"0.7rem","letterSpacing":"0.05em"}),
+                    html.Span(f"{layer_counts[lyr]}",
+                              style={"fontWeight":"600","fontSize":"0.8rem"}),
+                ],
+                style={
+                    "background":  JARGON_LAYER_COLOURS[lyr]["bg"],
+                    "color":       JARGON_LAYER_COLOURS[lyr]["color"],
+                    "border":      f"1px solid {JARGON_LAYER_COLOURS[lyr]['color']}",
+                    "borderRadius":"20px","padding":"3px 10px",
+                    "fontSize":"0.78rem","display":"inline-flex","alignItems":"center",
+                },
+            )
+            for lyr in _LAYER_DISPLAY_ORDER
+            if lyr in layer_counts
+        ],
+    ) if layer_counts else html.Span()
 
     agent_rows = [
-    ("Jargon",      clarity["jargon"],      "0.40",
-     f"{clarity['n_terms']} medical terms, {clarity['n_explained']} explained",
-     "Increase explained jargon via parentheticals e.g. 'metformin (a biguanide antidiabetic)'"),
-    ("Explanation", clarity["explanation"], "0.30",
-     f"{clarity['n_explained']}/{clarity['n_terms']} terms have inline definitions",
-     "Add definitions for unexplained medical terms"),
-    ("Fluency",     clarity["fluency"],     "0.15",
-     f"Flesch Reading Ease = {clarity['fre']}",
-     "Shorten sentences, reduce syllable density"),
-    ("Coherence",   clarity["coherence"],   "0.15",
-     f"{len(clarity['flagged_transitions'])} low-similarity transitions detected",
-     "Add linking phrases between abrupt topic changes"),
-]
-    final_col = score_colour(clarity["final"])
+        ("Jargon",      clarity["jargon"],      "0.40",
+         f"{clarity['n_terms']} medical terms, {clarity['n_explained']} explained",
+         "Increase explained jargon via parentheticals e.g. 'metformin (a biguanide antidiabetic)'",
+         "#f43f5e"),
+        ("Explanation", clarity["explanation"], "0.30",
+         f"{clarity['n_explained']}/{clarity['n_terms']} terms have inline definitions",
+         "Add definitions for unexplained medical terms",
+         "#8b5cf6"),
+        ("Fluency",     clarity["fluency"],     "0.15",
+         f"Flesch Reading Ease = {clarity['fre']}",
+         "Shorten sentences, reduce syllable density",
+         "#06b6d4"),
+        ("Coherence",   clarity["coherence"],   "0.15",
+         f"{len(clarity['flagged_transitions'])} low-similarity transitions detected",
+         "Add linking phrases between abrupt topic changes",
+         "#f59e0b"),
+    ]
 
     clarity_section = html.Div(
         style={"background":"#1e293b","border":f"1px solid {hex_to_rgba(final_col, 0.4)}",
                "borderRadius":"12px","padding":"20px","marginBottom":"20px"},
         children=[
-
-            # Header row
             html.Div(style={"display":"flex","justifyContent":"space-between",
-                            "alignItems":"center","marginBottom":"18px"}, children=[
+                            "alignItems":"center","marginBottom":"6px"}, children=[
                 html.Div([
                     html.P("CLARITYCONSENSUS SCORE",
                            style={"color":"#64748b","fontSize":"0.75rem","fontWeight":"700",
                                   "letterSpacing":"0.1em","margin":"0 0 4px"}),
-                    html.P("Multi-agent comprehensibility evaluation · Jargon × Explanation × Fluency × Coherence",
+                    html.P("Multi-agent comprehensibility · Jargon × Explanation × Fluency × Coherence",
                            style={"color":"#475569","fontSize":"0.76rem","margin":"0"}),
                 ]),
                 html.Div(style={"textAlign":"right"}, children=[
                     html.Span(f"{clarity['final']:.3f}",
                               style={"color":final_col,"fontSize":"2rem","fontWeight":"800",
                                      "fontFamily":"Courier New","lineHeight":"1"}),
-                    html.Span(" / 1.000",
-                              style={"color":"#475569","fontSize":"0.85rem"}),
+                    html.Span(" / 1.000", style={"color":"#475569","fontSize":"0.85rem"}),
                 ]),
             ]),
-
-            # Agent breakdown rows
+            layer_pill_row,
+            html.Hr(style={"borderColor":"#334155","margin":"14px 0"}),
             *[html.Div(style={
-    "display":"flex","gap":"14px","alignItems":"flex-start",
-    "marginBottom":"12px","paddingBottom":"12px",
-    "borderBottom":f"1px solid {hex_to_rgba(AGENT_COLOURS[name], 0.2)}",
-    "borderLeft":  f"3px solid {AGENT_COLOURS[name]}",
-    "paddingLeft": "12px",
-}, children=[
-    # Agent name + weight
-    html.Div(style={"minWidth":"110px"}, children=[
-        html.Span(name, style={
-            "color":      AGENT_COLOURS[name],
-            "fontSize":   "0.85rem",
-            "fontWeight": "700",
-        }),
-        html.Br(),
-        html.Span(f"w = {weight}", style={"color":"#475569","fontSize":"0.75rem"}),
-    ]),
-    # Score bar + detail
-    html.Div(style={"flex":"1"}, children=[
-        html.Div(style={"display":"flex","justifyContent":"space-between",
-                        "marginBottom":"4px"}, children=[
-            html.Span(detail, style={"color":"#94a3b8","fontSize":"0.78rem"}),
-            html.Span(f"{score:.3f}", style={
-                "color":      AGENT_COLOURS[name],
-                "fontWeight": "700",
-                "fontSize":   "0.85rem",
-                "fontFamily": "Courier New",
-            }),
-        ]),
-        # Background track
-        html.Div(style={"background":"#0f172a","borderRadius":"4px",
-                        "height":"6px","overflow":"hidden"}, children=[
-            html.Div(style={
-                "width":        f"{score*100:.1f}%",
-                "height":       "100%",
-                "background":   f"linear-gradient(90deg, {hex_to_rgba(AGENT_COLOURS[name], 0.5)}, {AGENT_COLOURS[name]})",
-                "borderRadius": "4px",
-            }),
-        ]),
-        html.Span(f"▲ {tip}", style={
-            "color":"#475569","fontSize":"0.75rem",
-            "marginTop":"4px","display":"block",
-        }) if score < 0.75 else html.Span(),
-    ]),
-]) for name, score, weight, detail, tip in agent_rows],
-            # Flagged coherence transitions
+                "display":"flex","gap":"14px","alignItems":"flex-start",
+                "marginBottom":"12px","paddingBottom":"12px",
+                "borderBottom":f"1px solid {hex_to_rgba(col, 0.2)}",
+                "borderLeft":  f"3px solid {col}",
+                "paddingLeft": "12px",
+            }, children=[
+                html.Div(style={"minWidth":"110px"}, children=[
+                    html.Span(name, style={"color":col,"fontSize":"0.85rem","fontWeight":"700"}),
+                    html.Br(),
+                    html.Span(f"w = {weight}", style={"color":"#475569","fontSize":"0.75rem"}),
+                ]),
+                html.Div(style={"flex":"1"}, children=[
+                    html.Div(style={"display":"flex","justifyContent":"space-between","marginBottom":"4px"}, children=[
+                        html.Span(detail, style={"color":"#94a3b8","fontSize":"0.78rem"}),
+                        html.Span(f"{score:.3f}", style={"color":col,"fontWeight":"700",
+                                                          "fontSize":"0.85rem","fontFamily":"Courier New"}),
+                    ]),
+                    html.Div(style={"background":"#0f172a","borderRadius":"4px","height":"6px","overflow":"hidden"}, children=[
+                        html.Div(style={"width":f"{score*100:.1f}%","height":"100%",
+                                        "background":f"linear-gradient(90deg,{hex_to_rgba(col,0.5)},{col})",
+                                        "borderRadius":"4px"}),
+                    ]),
+                    html.Span(f"▲ {tip}", style={"color":"#475569","fontSize":"0.75rem",
+                                                  "marginTop":"4px","display":"block"})
+                    if score < 0.75 else html.Span(),
+                ]),
+            ]) for name, score, weight, detail, tip, col in agent_rows],
             *([
                 html.Hr(style={"borderColor":"#1e3a5f","margin":"8px 0"}),
                 html.P("LOW-COHERENCE TRANSITIONS",
@@ -792,16 +1103,14 @@ def run_analysis(n, text):
                 *[html.Div(style={"background":"#0f172a","borderRadius":"6px",
                                   "padding":"8px 12px","marginBottom":"6px",
                                   "borderLeft":"3px solid #f97316"}, children=[
-                    html.Span(f"sim={t[2]}  ",
-                              style={"color":"#f97316","fontFamily":"Courier New",
-                                     "fontSize":"0.78rem","fontWeight":"700"}),
-                    html.Span(f'"{t[0]}..." -> "{t[1]}..."',
-                              style={"color":"#94a3b8","fontSize":"0.78rem"}),
+                    html.Span(f"sim={t[2]}  ", style={"color":"#f97316","fontFamily":"Courier New",
+                                                       "fontSize":"0.78rem","fontWeight":"700"}),
+                    html.Span(f'"{t[0]}…" → "{t[1]}…"', style={"color":"#94a3b8","fontSize":"0.78rem"}),
                 ]) for t in clarity["flagged_transitions"][:4]],
             ] if clarity["flagged_transitions"] else []),
         ]
     )
-    # ── Radar chart ──
+
     dims       = ["FHL","CHL","CRHL","DHL","EHL"]
     dim_labels = ["Functional","Communicative","Critical","Digital","Expressed"]
     vals       = [raw[d] for d in dims]
@@ -809,45 +1118,35 @@ def run_analysis(n, text):
     norm_vals  = [v / mx * 100 for v in vals]
 
     radar_fig = go.Figure(go.Scatterpolar(
-        r=norm_vals + [norm_vals[0]],
-        theta=dim_labels + [dim_labels[0]],
-        fill="toself",
-        fillcolor=hex_to_rgba(pcol, 0.2),
-        line=dict(color=pcol, width=2.5),
-        marker=dict(size=6, color=pcol),
+        r=norm_vals + [norm_vals[0]], theta=dim_labels + [dim_labels[0]],
+        fill="toself", fillcolor=hex_to_rgba(pcol, 0.2),
+        line=dict(color=pcol, width=2.5), marker=dict(size=6, color=pcol),
     ))
     radar_fig.update_layout(
-        polar=dict(
-            bgcolor="#0f172a",
-            radialaxis=dict(visible=True, range=[0,100], gridcolor="#334155",
-                            tickfont=dict(color="#64748b", size=9)),
-            angularaxis=dict(gridcolor="#334155", tickfont=dict(color="#cbd5e1", size=11)),
-        ),
+        polar=dict(bgcolor="#0f172a",
+                   radialaxis=dict(visible=True, range=[0,100], gridcolor="#334155",
+                                   tickfont=dict(color="#64748b", size=9)),
+                   angularaxis=dict(gridcolor="#334155", tickfont=dict(color="#cbd5e1", size=11))),
         paper_bgcolor="#1e293b", plot_bgcolor="#1e293b",
-        margin=dict(l=40, r=40, t=30, b=30), height=290,
-        showlegend=False,
+        margin=dict(l=40,r=40,t=30,b=30), height=290, showlegend=False,
     )
 
-    # ── Factor bars ──
     factor_fig = go.Figure()
     for fname, fval, colour in [("F1  Core", f1, "#6366f1"),
                                   ("F2  Digital", f2, "#06b6d4"),
                                   ("F3  Applied", f3, "#f59e0b")]:
-        normed = (fval + 5) / 10 * 100
         factor_fig.add_trace(go.Bar(
-            x=[normed], y=[fname], orientation="h",
+            x=[(fval + 5) / 10 * 100], y=[fname], orientation="h",
             marker=dict(color=colour, line=dict(width=0)),
             text=f"{fval:+.3f}", textposition="inside",
-            textfont=dict(color="#fff", size=11, family="Courier New"),
-            width=0.5,
+            textfont=dict(color="#fff", size=11, family="Courier New"), width=0.5,
         ))
     factor_fig.add_vline(x=50, line_dash="dash", line_color="#475569", line_width=1)
     factor_fig.update_layout(
         barmode="overlay", paper_bgcolor="#1e293b", plot_bgcolor="#0f172a",
         xaxis=dict(range=[0,100], showticklabels=False, gridcolor="#1e293b"),
         yaxis=dict(tickfont=dict(color="#cbd5e1", size=11)),
-        margin=dict(l=10, r=10, t=10, b=10), height=160,
-        showlegend=False,
+        margin=dict(l=10,r=10,t=10,b=10), height=160, showlegend=False,
     )
 
     charts = dbc.Row(style={"marginBottom":"20px"}, children=[
@@ -875,60 +1174,45 @@ def run_analysis(n, text):
                     html.Div(style={"background":"#0f172a","borderRadius":"8px",
                                     "padding":"10px 16px","textAlign":"center",
                                     "flex":"1","minWidth":"70px"}, children=[
-                        html.P(d, style={"color":"#64748b","fontSize":"0.72rem",
-                                         "fontWeight":"700","margin":"0"}),
-                        html.P(f"{raw[d]:.3f}",
-                               style={"color":"#f1f5f9","fontSize":"1.05rem",
-                                      "fontWeight":"700","margin":"4px 0 0",
-                                      "fontFamily":"Courier New"}),
+                        html.P(d, style={"color":"#64748b","fontSize":"0.72rem","fontWeight":"700","margin":"0"}),
+                        html.P(f"{raw[d]:.3f}", style={"color":"#f1f5f9","fontSize":"1.05rem",
+                                                        "fontWeight":"700","margin":"4px 0 0",
+                                                        "fontFamily":"Courier New"}),
                     ]) for d in dims
                 ]),
             ])
         ]),
     ])
 
-    # ── Guidance cards ──
-    other_profiles = [p for p in ["Balanced","Transitional","Specialized"] if p != profile]
-    guidance_cards = []
+    other_profiles  = [p for p in ["Balanced","Transitional","Specialized"] if p != profile]
+    guidance_cards  = []
     for target in other_profiles:
         g    = get_guidance(profile, target)
         tcol = PROFILE_COLOURS[target]
         guidance_cards.append(dbc.Col(md=6, children=[
-            html.Div(style={"background":"#1e293b",
-                            "border":f"1px solid {hex_to_rgba(tcol, 0.3)}",
+            html.Div(style={"background":"#1e293b","border":f"1px solid {hex_to_rgba(tcol,0.3)}",
                             "borderRadius":"12px","padding":"20px","height":"100%"}, children=[
-                html.Div(style={"display":"flex","alignItems":"center",
-                                "gap":"10px","marginBottom":"14px"}, children=[
+                html.Div(style={"display":"flex","alignItems":"center","gap":"10px","marginBottom":"14px"}, children=[
                     html.Div(style={"width":"10px","height":"10px","borderRadius":"50%",
                                     "background":tcol,"flexShrink":"0"}),
                     html.P(f"To reach  {target.upper()}",
                            style={"color":tcol,"fontWeight":"700","fontSize":"0.9rem","margin":"0"}),
                 ]),
                 html.Div(style={"marginBottom":"12px"}, children=[
-                    html.P("▲  ELEVATE",
-                           style={"color":"#22c55e","fontSize":"0.75rem","fontWeight":"700",
-                                  "letterSpacing":"0.08em","margin":"0 0 8px"}),
+                    html.P("▲  ELEVATE", style={"color":"#22c55e","fontSize":"0.75rem","fontWeight":"700",
+                                                 "letterSpacing":"0.08em","margin":"0 0 8px"}),
                     html.Ul(style={"margin":"0","paddingLeft":"18px"}, children=[
-                        html.Li(tip, style={"color":"#cbd5e1","fontSize":"0.85rem",
-                                             "marginBottom":"5px","lineHeight":"1.4"})
+                        html.Li(tip, style={"color":"#cbd5e1","fontSize":"0.85rem","marginBottom":"5px","lineHeight":"1.4"})
                         for tip in g.get("elevate",[])
-                    ] if g.get("elevate") else [
-                        html.Li("No specific elevation needed.",
-                                style={"color":"#64748b","fontSize":"0.85rem"})
-                    ]),
+                    ] or [html.Li("No specific elevation needed.", style={"color":"#64748b","fontSize":"0.85rem"})]),
                 ]),
                 html.Div(children=[
-                    html.P("▼  REDUCE",
-                           style={"color":"#ef4444","fontSize":"0.75rem","fontWeight":"700",
-                                  "letterSpacing":"0.08em","margin":"0 0 8px"}),
+                    html.P("▼  REDUCE", style={"color":"#ef4444","fontSize":"0.75rem","fontWeight":"700",
+                                                "letterSpacing":"0.08em","margin":"0 0 8px"}),
                     html.Ul(style={"margin":"0","paddingLeft":"18px"}, children=[
-                        html.Li(tip, style={"color":"#cbd5e1","fontSize":"0.85rem",
-                                             "marginBottom":"5px","lineHeight":"1.4"})
+                        html.Li(tip, style={"color":"#cbd5e1","fontSize":"0.85rem","marginBottom":"5px","lineHeight":"1.4"})
                         for tip in g.get("reduce",[])
-                    ] if g.get("reduce") else [
-                        html.Li("No specific reduction needed.",
-                                style={"color":"#64748b","fontSize":"0.85rem"})
-                    ]),
+                    ] or [html.Li("No specific reduction needed.", style={"color":"#64748b","fontSize":"0.85rem"})]),
                 ]),
             ])
         ]))
@@ -940,57 +1224,43 @@ def run_analysis(n, text):
         dbc.Row(guidance_cards),
     ])
 
-    # ── Interpretation ──
     interpretations = {
         "Balanced":     "Well-rounded health literacy across all dimensions. This author integrates medical vocabulary, contextualised questions, causal reasoning, and evidence awareness. Suitable for clinical content, shared-decision tools, and evidence-based patient education.",
         "Transitional": "Developing health literacy. The author uses plain language, limited medical terminology, and direct questions reflecting genuine uncertainty. Best served by simplified explanations, step-by-step guidance, and plain-language resources.",
         "Specialized":  f"Niche literacy profile ({sub or 'mixed'}). Digitally-Specialized authors cite credible databases and studies. Functionally-Specialized authors express rich personal health narratives. Content should be tailored to the detected sub-type.",
     }
-
-    interp = html.Div(style={"background":"#1e293b",
-                              "border":f"1px solid {hex_to_rgba(pcol, 0.35)}",
+    interp = html.Div(style={"background":"#1e293b","border":f"1px solid {hex_to_rgba(pcol,0.35)}",
                               "borderRadius":"12px","padding":"20px","marginBottom":"28px"}, children=[
         html.P("PROFILE INTERPRETATION",
                style={"color":"#64748b","fontSize":"0.75rem","fontWeight":"700",
                       "letterSpacing":"0.1em","margin":"0 0 10px"}),
-        html.P(interpretations.get(profile, ""),
+        html.P(interpretations.get(profile,""),
                style={"color":"#cbd5e1","fontSize":"0.92rem","lineHeight":"1.6","margin":"0"}),
     ])
-    # ── Text annotation ──────────────────────────────────────────────────────
-    raw_spans = annotate_text(text)
 
     span_elements = []
-    for segment, dim in raw_spans:
+    for segment, dim in annotate_text(text):
         if dim and dim in DIMENSION_COLOURS:
             dc = DIMENSION_COLOURS[dim]
             span_elements.append(html.Span(
-                segment,
-                title=dc["label"],    # tooltip on hover
-                style={
-                    "background":    dc["bg"],
-                    "color":         dc["color"],
-                    "borderBottom":  f"2px solid {dc['color']}",
-                    "borderRadius":  "3px",
-                    "padding":       "1px 3px",
-                    "fontWeight":    "600",
-                    "cursor":        "help",
-                }
+                segment, title=dc["label"],
+                style={"background":dc["bg"],"color":dc["color"],
+                       "borderBottom":f"2px solid {dc['color']}","borderRadius":"3px",
+                       "padding":"1px 3px","fontWeight":"600","cursor":"help"},
             ))
         else:
-            span_elements.append(html.Span(segment, style={"color": "#cbd5e1"}))
+            span_elements.append(html.Span(segment, style={"color":"#cbd5e1"}))
 
     dim_legend = html.Div(
         style={"display":"flex","gap":"16px","flexWrap":"wrap","marginBottom":"14px"},
         children=[
             html.Div(style={"display":"flex","alignItems":"center","gap":"6px"}, children=[
                 html.Div(style={"width":"11px","height":"11px","borderRadius":"2px",
-                                "background": DIMENSION_COLOURS[dim]["color"]}),
-                html.Span(
-                    f"{dim} — {DIMENSION_COLOURS[dim]['label']}",
-                    style={"color":"#94a3b8","fontSize":"0.78rem"}
-                ),
+                                "background":DIMENSION_COLOURS[dim]["color"]}),
+                html.Span(f"{dim} — {DIMENSION_COLOURS[dim]['label']}",
+                          style={"color":"#94a3b8","fontSize":"0.78rem"}),
             ]) for dim in ["FHL","CHL","CRHL","DHL","EHL"]
-        ]
+        ],
     )
 
     annotation_section = html.Div(
@@ -1000,79 +1270,136 @@ def run_analysis(n, text):
             html.P("TEXT ANNOTATION — Highlighted by HL Dimension",
                    style={"color":"#64748b","fontSize":"0.75rem","fontWeight":"700",
                           "letterSpacing":"0.1em","margin":"0 0 12px"}),
-            html.P("Hover over a highlighted word to see its dimension. "
-                   "Unhighlighted text does not strongly signal any dimension.",
+            html.P("Hover over a highlighted word to see its dimension.",
                    style={"color":"#475569","fontSize":"0.78rem","margin":"0 0 12px"}),
             dim_legend,
             html.Hr(style={"borderColor":"#334155","margin":"0 0 14px"}),
-            html.Div(
-                span_elements,
-                style={"fontSize":"0.95rem","lineHeight":"2.0",
-                       "fontFamily":"'Courier New',monospace",
-                       "whiteSpace":"pre-wrap","wordBreak":"break-word"}
-            ),
-        ]
+            html.Div(span_elements,
+                     style={"fontSize":"0.95rem","lineHeight":"2.0",
+                            "fontFamily":"'Courier New',monospace",
+                            "whiteSpace":"pre-wrap","wordBreak":"break-word"}),
+        ],
     )
-    # ── Clarity annotation section ────────────────────────────────────────────
-    clarity_spans = annotate_clarity(text) or []
 
-    clarity_elements  = []
-    for segment, agent in clarity_spans:
-        if agent and agent in CLARITY_ANNOTATION_COLOURS:
-            ac = CLARITY_ANNOTATION_COLOURS[agent]
-            clarity_elements.append(html.Span(
-                segment,
-                title=ac["label"],
-                style={
-                    "background":   ac["bg"],
-                    "color":        ac["color"],
-                    "borderBottom": f"2px solid {ac['color']}",
-                    "borderRadius": "3px",
-                    "padding":      "1px 3px",
-                    "fontWeight":   "600",
-                    "cursor":       "help",
-                }
-            ))
-        else:
-            clarity_elements.append(html.Span(segment, style={"color": "#cbd5e1"}))
+    clarity_legend_items = []
+    for lyr in _LAYER_DISPLAY_ORDER:
+        cfg = JARGON_LAYER_COLOURS[lyr]
+        clarity_legend_items.append(
+            html.Div(style={"display":"flex","alignItems":"center","gap":"6px"}, children=[
+                html.Div(style={"width":"11px","height":"11px","borderRadius":"2px","background":cfg["color"]}),
+                html.Span(
+                    [html.Span(cfg["badge"],
+                               style={"background":cfg["color"],"color":"#0f172a","borderRadius":"3px",
+                                      "padding":"0 4px","fontSize":"0.65rem","fontWeight":"800",
+                                      "marginRight":"4px"}),
+                     cfg["label"]],
+                    style={"color":"#94a3b8","fontSize":"0.78rem"},
+                ),
+            ])
+        )
+    for key in ("Explanation","Coherence","Fluency"):
+        cfg = CLARITY_ANNOTATION_COLOURS[key]
+        clarity_legend_items.append(
+            html.Div(style={"display":"flex","alignItems":"center","gap":"6px"}, children=[
+                html.Div(style={"width":"11px","height":"11px","borderRadius":"2px","background":cfg["color"]}),
+                html.Span(cfg["label"], style={"color":"#94a3b8","fontSize":"0.78rem"}),
+            ])
+        )
 
     clarity_legend = html.Div(
-        style={"display":"flex","gap":"16px","flexWrap":"wrap","marginBottom":"14px"},
-        children=[
-            html.Div(style={"display":"flex","alignItems":"center","gap":"6px"}, children=[
-                html.Div(style={"width":"11px","height":"11px","borderRadius":"2px",
-                                "background": CLARITY_ANNOTATION_COLOURS[ag]["color"]}),
-                html.Span(
-                    CLARITY_ANNOTATION_COLOURS[ag]["label"],
-                    style={"color":"#94a3b8","fontSize":"0.78rem"}
-                ),
-            ]) for ag in ["Jargon","Explanation","Coherence","Fluency"]
-        ]
+        style={"display":"flex","gap":"12px","flexWrap":"wrap","marginBottom":"14px"},
+        children=clarity_legend_items,
     )
+
+    clarity_elements = []
+    for segment, agent in annotate_clarity(text):
+        if agent and agent in CLARITY_ANNOTATION_COLOURS:
+            ac = CLARITY_ANNOTATION_COLOURS[agent]
+            if agent.startswith("Jargon-"):
+                layer_key = agent.split("-", 1)[1]
+                badge_cfg = JARGON_LAYER_COLOURS.get(layer_key, {})
+                clarity_elements.append(
+                    html.Span(
+                        [
+                            html.Span(segment),
+                            html.Span(
+                                badge_cfg.get("badge", layer_key.upper()),
+                                style={
+                                    "background":    ac["color"],
+                                    "color":         "#0f172a",
+                                    "borderRadius":  "3px",
+                                    "padding":       "0 4px",
+                                    "fontSize":      "0.6rem",
+                                    "fontWeight":    "800",
+                                    "verticalAlign": "super",
+                                    "marginLeft":    "2px",
+                                    "lineHeight":    "1",
+                                },
+                            ),
+                        ],
+                        title=ac["label"],
+                        style={
+                            "background":    ac["bg"],
+                            "color":         ac["color"],
+                            "borderBottom":  f"2px solid {ac['color']}",
+                            "borderRadius":  "3px",
+                            "padding":       "1px 3px",
+                            "fontWeight":    "600",
+                            "cursor":        "help",
+                        },
+                    )
+                )
+            else:
+                clarity_elements.append(
+                    html.Span(segment, title=ac["label"],
+                              style={"background":ac["bg"],"color":ac["color"],
+                                     "borderBottom":f"2px solid {ac['color']}",
+                                     "borderRadius":"3px","padding":"1px 3px",
+                                     "fontWeight":"600","cursor":"help"})
+                )
+        else:
+            clarity_elements.append(html.Span(segment, style={"color":"#cbd5e1"}))
 
     clarity_annotation_section = html.Div(
         style={"background":"#1e293b","border":"1px solid #334155",
                "borderRadius":"12px","padding":"20px","marginBottom":"20px"},
         children=[
-            html.P("TEXT ANNOTATION — Highlighted by ClarityConsensus Agent",
+            html.P("TEXT ANNOTATION — ClarityConsensus Agent (with Jargon Layer Labels)",
                    style={"color":"#64748b","fontSize":"0.75rem","fontWeight":"700",
                           "letterSpacing":"0.1em","margin":"0 0 12px"}),
-            html.P("Hover over a highlighted word to see which agent it triggers. "
-                   "Unhighlighted text does not strongly signal any agent.",
-                   style={"color":"#475569","fontSize":"0.78rem","margin":"0 0 12px"}),
+            html.P([
+                "Hover for agent name. Jargon terms carry a superscript badge showing detection layer: ",
+                html.Span("NER",   style={"background":JARGON_LAYER_COLOURS["NER"]["color"],
+                                          "color":"#0f172a","borderRadius":"3px","padding":"0 5px",
+                                          "fontSize":"0.7rem","fontWeight":"800","marginRight":"4px"}),
+                html.Span("LEX",   style={"background":JARGON_LAYER_COLOURS["lexicon"]["color"],
+                                          "color":"#0f172a","borderRadius":"3px","padding":"0 5px",
+                                          "fontSize":"0.7rem","fontWeight":"800","marginRight":"4px"}),
+                html.Span("MORPH", style={"background":JARGON_LAYER_COLOURS["morphology"]["color"],
+                                          "color":"#0f172a","borderRadius":"3px","padding":"0 5px",
+                                          "fontSize":"0.7rem","fontWeight":"800","marginRight":"4px"}),
+                html.Span("SYL",   style={"background":JARGON_LAYER_COLOURS["syllable"]["color"],
+                                          "color":"#0f172a","borderRadius":"3px","padding":"0 5px",
+                                          "fontSize":"0.7rem","fontWeight":"800"}),
+            ], style={"color":"#475569","fontSize":"0.78rem","margin":"0 0 12px"}),
             clarity_legend,
             html.Hr(style={"borderColor":"#334155","margin":"0 0 14px"}),
-            html.Div(
-                clarity_elements,
-                style={"fontSize":"0.95rem","lineHeight":"2.0",
-                       "fontFamily":"'Courier New',monospace",
-                       "whiteSpace":"pre-wrap","wordBreak":"break-word"}
-            ),
-        ]
+            html.Div(clarity_elements,
+                     style={"fontSize":"0.95rem","lineHeight":"2.4",
+                            "fontFamily":"'Courier New',monospace",
+                            "whiteSpace":"pre-wrap","wordBreak":"break-word"}),
+        ],
     )
-    return html.Div([hero, clarity_section, annotation_section, clarity_annotation_section, charts, guidance, interp])
 
-
+    return html.Div([
+        hero,
+        clarity_section,
+        annotation_section,
+        clarity_annotation_section,
+        charts,
+        guidance,
+        interp,
+    ])
 
 
 if __name__ == "__main__":

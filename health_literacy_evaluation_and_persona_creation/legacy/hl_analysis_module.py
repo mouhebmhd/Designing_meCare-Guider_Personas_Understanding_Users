@@ -16,7 +16,8 @@ Dependencies:
     Also requires a trained model file (default "hl_bvae_model.pt") and
     spaCy model (en_core_sci_md or en_core_web_sm).
 
- Date: 2026-03-23
+Date: 2026-03-23
+Jargon detection: v2 — layered NER + morphology + PhraseMatcher + syllable count
 """
 
 import warnings
@@ -30,9 +31,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import textstat
 import spacy
+from spacy.matcher import PhraseMatcher
 import nltk
 
-from .health_literacy_regex_patterns  import (
+from .health_literacy_regex_patterns import (
     extract_fhl_features,
     extract_chl_features,
     extract_crhl_features,
@@ -65,10 +67,10 @@ PROFILE_COLOURS = {
 }
 
 # HL level thresholds (loaded from model checkpoint)
-HL_THRESHOLDS = None
-F1_MEDIAN = None
-SCALER_MEAN = None
-SCALER_SCALE = None
+HL_THRESHOLDS  = None
+F1_MEDIAN      = None
+SCALER_MEAN    = None
+SCALER_SCALE   = None
 FACTOR_LOADINGS = None
 
 # Global model variable (lazy loading)
@@ -76,23 +78,209 @@ _BVAE_MODEL = None
 
 # =============================================================================
 # spaCy model loading (fallback to en_core_web_sm if sci_md not available)
-# NOTE: spaCy is also loaded inside health_literacy_regex_patterns; this
-# instance is kept for annotate_text / annotate_clarity which need the doc.
 # =============================================================================
 try:
     nlp = spacy.load("en_core_sci_md")
 except OSError:
     nlp = spacy.load("en_core_web_sm")
 
-# Used by clarity_consensus and annotate_clarity (spaCy NER-based functions)
+# NER labels considered medical by layer 1
 MEDICAL_ENTITY_LABELS = {"DISEASE", "CHEMICAL", "ENTITY"}
+
+# =============================================================================
+# JARGON DETECTION — Layer 2: Morphological regex
+# Covers prefixes and suffixes that are almost exclusively medical/scientific.
+# =============================================================================
+_MEDICAL_SUFFIX = re.compile(
+    r"\b\w+(?:"
+    # disease / pathology suffixes
+    r"itis|osis|emia|uria|algia|trophy|plasia|genesis|lysis|penia"
+    r"|megaly|stenosis|sclerosis|spasm|plegia|paresis|philia|phobia"
+    # procedure suffixes
+    r"|ectomy|plasty|otomy|oscopy|ostomy|pexy|rraphy|desis"
+    # diagnostic / specialty suffixes
+    r"|ology|opathy|iatry|iatrics|graphy|gram|meter|scopy"
+    # drug / chemistry suffixes
+    r"|mycin|cillin|oxacin|olol|pril|sartan|statin|mab|zumab|ximab|kinib"
+    r"|vir|tide|parin|azole|dazole|oxazole|thiazole"
+    # tumour / blood suffixes
+    r"|carcinoma|sarcoma|lymphoma|leukemia|blastoma|cytoma|adenoma"
+    r"|cytosis|cytopenia|globin|globulin"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_MEDICAL_PREFIX = re.compile(
+    r"\b(?:"
+    r"hyper|hypo|tachy|brady|poly|oligo|macro|micro|neo|anti|contra"
+    r"|intra|inter|trans|supra|sub|peri|para|endo|exo|hemo|haemo"
+    r"|cardio|neuro|hepato|nephro|gastro|entero|dermato|onco|immuno"
+    r"|osteo|arthro|myo|angio|lympho|pneumo|pulmo|thrombo|cyto|fibro"
+    r")\w{3,}\b",
+    re.IGNORECASE,
+)
+
+# =============================================================================
+# JARGON DETECTION — Layer 3: PhraseMatcher curated lexicon
+# Source terms drawn from MeSH, BioPortal, ICD-10, and common clinical usage.
+# Extend MEDICAL_LEXICON freely — it is the main knob for recall improvement.
+# =============================================================================
+MEDICAL_LEXICON = [
+    # Common conditions
+    "myocardial infarction", "heart attack", "atrial fibrillation",
+    "heart failure", "cardiac arrest", "coronary artery disease",
+    "type 1 diabetes", "type 2 diabetes", "diabetes mellitus",
+    "hypertension", "hyperlipidemia", "dyslipidemia", "hypercholesterolemia",
+    "chronic kidney disease", "acute kidney injury", "renal failure",
+    "chronic obstructive pulmonary disease", "COPD", "asthma", "pneumonia",
+    "tuberculosis", "sepsis", "septicemia", "bacteremia",
+    "stroke", "ischemic stroke", "hemorrhagic stroke", "transient ischemic attack",
+    "deep vein thrombosis", "pulmonary embolism",
+    "Alzheimer disease", "Parkinson disease", "multiple sclerosis",
+    "epilepsy", "seizure disorder",
+    "rheumatoid arthritis", "osteoarthritis", "systemic lupus erythematosus",
+    "celiac disease", "Crohn disease", "ulcerative colitis",
+    "hepatitis A", "hepatitis B", "hepatitis C", "cirrhosis", "liver failure",
+    "HIV", "AIDS", "human immunodeficiency virus",
+    "breast cancer", "lung cancer", "colorectal cancer", "prostate cancer",
+    "melanoma", "leukemia", "lymphoma", "glioblastoma",
+    "anemia", "iron deficiency anemia", "sickle cell disease",
+    "hyperthyroidism", "hypothyroidism", "Graves disease", "Hashimoto thyroiditis",
+    "polycystic ovary syndrome", "PCOS", "endometriosis", "fibromyalgia",
+    "anxiety disorder", "major depressive disorder", "bipolar disorder",
+    "schizophrenia", "post-traumatic stress disorder", "PTSD",
+    "autism spectrum disorder", "attention deficit hyperactivity disorder", "ADHD",
+    # Anatomy / physiology
+    "myocardium", "pericardium", "endocardium", "epicardium",
+    "aorta", "ventricle", "atrium", "mitral valve", "tricuspid valve",
+    "alveoli", "bronchiole", "trachea", "pleura", "diaphragm",
+    "glomerulus", "nephron", "renal tubule", "ureter", "urethra",
+    "synapse", "axon", "dendrite", "neurotransmitter", "cerebellum",
+    "hypothalamus", "hippocampus", "amygdala", "prefrontal cortex",
+    "pancreas", "liver", "gallbladder", "bile duct", "duodenum",
+    "jejunum", "ileum", "colon", "rectum", "peritoneum",
+    "femur", "tibia", "fibula", "patella", "humerus", "radius", "ulna",
+    "lymph node", "spleen", "thymus", "bone marrow",
+    "adrenal gland", "thyroid gland", "parathyroid gland", "pituitary gland",
+    # Drugs / pharmacology
+    "metformin", "insulin", "glipizide", "sitagliptin", "empagliflozin",
+    "lisinopril", "ramipril", "enalapril", "amlodipine", "nifedipine",
+    "atorvastatin", "rosuvastatin", "simvastatin", "pravastatin",
+    "metoprolol", "carvedilol", "bisoprolol", "atenolol",
+    "warfarin", "rivaroxaban", "apixaban", "dabigatran", "heparin",
+    "aspirin", "clopidogrel", "ticagrelor",
+    "amoxicillin", "azithromycin", "ciprofloxacin", "doxycycline",
+    "vancomycin", "meropenem", "piperacillin", "tazobactam",
+    "prednisone", "dexamethasone", "hydrocortisone", "methylprednisolone",
+    "ibuprofen", "naproxen", "diclofenac", "celecoxib",
+    "acetaminophen", "paracetamol", "tramadol", "morphine", "oxycodone",
+    "levothyroxine", "methimazole", "propylthiouracil",
+    "omeprazole", "pantoprazole", "ranitidine", "ondansetron",
+    "fluoxetine", "sertraline", "escitalopram", "venlafaxine", "duloxetine",
+    "olanzapine", "risperidone", "quetiapine", "haloperidol",
+    "lorazepam", "diazepam", "alprazolam", "clonazepam",
+    "albuterol", "salbutamol", "salmeterol", "tiotropium", "budesonide",
+    "adalimumab", "infliximab", "rituximab", "trastuzumab", "bevacizumab",
+    "pembrolizumab", "nivolumab", "ipilimumab",
+    # Procedures / diagnostics
+    "electrocardiogram", "echocardiogram", "angiography", "angioplasty",
+    "coronary bypass", "percutaneous coronary intervention",
+    "computed tomography", "magnetic resonance imaging", "MRI", "CT scan",
+    "positron emission tomography", "PET scan", "ultrasound", "sonography",
+    "endoscopy", "colonoscopy", "bronchoscopy", "laparoscopy",
+    "biopsy", "fine needle aspiration", "lumbar puncture", "spinal tap",
+    "hemodialysis", "peritoneal dialysis",
+    "mechanical ventilation", "intubation", "tracheostomy",
+    "chemotherapy", "radiotherapy", "immunotherapy", "targeted therapy",
+    "bone marrow transplant", "stem cell transplant",
+    "complete blood count", "CBC", "metabolic panel", "lipid panel",
+    "hemoglobin A1c", "HbA1c", "prothrombin time", "INR",
+    "creatinine", "eGFR", "troponin", "BNP", "NT-proBNP",
+    "C-reactive protein", "erythrocyte sedimentation rate", "ESR",
+    "polymerase chain reaction", "PCR", "enzyme-linked immunosorbent assay", "ELISA",
+    # General clinical terminology
+    "prognosis", "etiology", "pathophysiology", "comorbidity", "contraindication",
+    "pharmacokinetics", "pharmacodynamics", "bioavailability", "half-life",
+    "adverse event", "adverse effect", "side effect", "iatrogenic",
+    "randomized controlled trial", "meta-analysis", "systematic review",
+    "confidence interval", "odds ratio", "relative risk", "hazard ratio",
+    "placebo", "double-blind", "intention-to-treat", "per-protocol",
+    "incidence", "prevalence", "sensitivity", "specificity",
+    "positive predictive value", "negative predictive value",
+    "number needed to treat", "number needed to harm",
+]
+
+# Build PhraseMatcher once at module load (reused across all calls)
+_PHRASE_MATCHER = PhraseMatcher(nlp.vocab, attr="LOWER")
+_phrase_docs = [nlp.make_doc(term) for term in MEDICAL_LEXICON]
+_PHRASE_MATCHER.add("MEDICAL_JARGON", _phrase_docs)
+
+# =============================================================================
+# JARGON DETECTION — unified helper
+# Returns True if the given text (a token text or span text) is jargon,
+# and also returns the detection layer for transparency.
+# =============================================================================
+_SYLLABLE_THRESHOLD = 4   # ≥4 syllables → likely technical
+
+
+def _detect_jargon_spans(doc):
+    """
+    Return a set of (start_char, end_char) tuples for all jargon spans found
+    in *doc*, using all four detection layers in priority order.
+
+    Layer 1 — spaCy NER  (DISEASE / CHEMICAL / ENTITY labels)
+    Layer 2 — Morphological regex  (medical suffix / prefix patterns)
+    Layer 3 — PhraseMatcher curated lexicon
+    Layer 4 — Syllable count  (≥ SYLLABLE_THRESHOLD syllables, alpha only)
+
+    Spans are deduplicated: a character position is assigned to at most one
+    layer (whichever fires first for that position).
+    """
+    n = len(doc.text)
+    assigned = [False] * n  # track which characters are already labelled
+
+    jargon_spans = {}  # (start, end) → layer_name
+
+    def _mark(start, end, layer):
+        if 0 <= start < end <= n:
+            if not any(assigned[i] for i in range(start, end)):
+                jargon_spans[(start, end)] = layer
+                for i in range(start, end):
+                    assigned[i] = True
+
+    # --- Layer 1: NER -------------------------------------------------------
+    for ent in doc.ents:
+        if ent.label_ in MEDICAL_ENTITY_LABELS:
+            _mark(ent.start_char, ent.end_char, "NER")
+
+    # --- Layer 2: Morphology ------------------------------------------------
+    text = doc.text
+    for pattern in (_MEDICAL_SUFFIX, _MEDICAL_PREFIX):
+        for m in pattern.finditer(text):
+            _mark(m.start(), m.end(), "morphology")
+
+    # --- Layer 3: PhraseMatcher ---------------------------------------------
+    matches = _PHRASE_MATCHER(doc)
+    for match_id, start_tok, end_tok in matches:
+        span = doc[start_tok:end_tok]
+        _mark(span.start_char, span.end_char, "lexicon")
+
+    # --- Layer 4: Syllable count --------------------------------------------
+    for token in doc:
+        if token.is_alpha and len(token.text) >= 6:
+            if textstat.syllable_count(token.text) >= _SYLLABLE_THRESHOLD:
+                _mark(token.idx, token.idx + len(token.text), "syllable")
+
+    return jargon_spans  # {(start, end): layer}
+
 
 # =============================================================================
 # Text cleaning and feature extraction
 # =============================================================================
-_HTML = re.compile(r"<[^>]+>")
+_HTML  = re.compile(r"<[^>]+>")
 _SPACE = re.compile(r"\s{2,}")
 _NOISE = re.compile(r"[^\w\s\.,;:!?()\-\'\"/%°+]")
+
 
 def clean_text(text):
     text = _HTML.sub(" ", text)
@@ -100,14 +288,14 @@ def clean_text(text):
     text = _NOISE.sub(" ", text)
     return _SPACE.sub(" ", text).strip().lower()
 
+
 def extract_features(text: str) -> dict:
     """
     Extract a dictionary of features from text using regex + POS patterns.
     Delegates to health_literacy_regex_patterns.extract_all_features().
-    Output keys are identical to the previous keyword-based implementation
-    so aggregate_scores() and all downstream code remain unchanged.
     """
     return extract_all_features(text)
+
 
 def aggregate_scores(feat):
     """Aggregate feature dictionary into the five HL dimensions."""
@@ -131,6 +319,7 @@ def aggregate_scores(feat):
              "function_word_ratio")
 
     return np.array([[fhl, chl, crhl, dhl, ehl]], dtype=np.float32)
+
 
 # =============================================================================
 # BVAE model definition
@@ -167,6 +356,7 @@ class BVAE(nn.Module):
         z = mu + torch.exp(0.5 * lv) * torch.randn_like(mu)
         return self.decode(z), mu, lv
 
+
 # =============================================================================
 # Model loading and global variables
 # =============================================================================
@@ -182,12 +372,12 @@ def _load_model(model_path=None):
 
     try:
         ckpt = torch.load(model_path, map_location=DEVICE, weights_only=False)
-        LATENT_DIM = ckpt["latent_dim"]
+        LATENT_DIM      = ckpt["latent_dim"]
         FACTOR_LOADINGS = ckpt["factor_loadings"]
-        HL_THRESHOLDS = ckpt["hl_thresholds"]
-        F1_MEDIAN = ckpt["f1_median"]
-        SCALER_MEAN = ckpt["scaler_mean"]
-        SCALER_SCALE = ckpt["scaler_scale"]
+        HL_THRESHOLDS   = ckpt["hl_thresholds"]
+        F1_MEDIAN       = ckpt["f1_median"]
+        SCALER_MEAN     = ckpt["scaler_mean"]
+        SCALER_SCALE    = ckpt["scaler_scale"]
 
         _BVAE_MODEL = BVAE(input_dim=5, latent_dim=LATENT_DIM).to(DEVICE)
         _BVAE_MODEL.load_state_dict(ckpt["model_state"])
@@ -196,9 +386,11 @@ def _load_model(model_path=None):
     except Exception as e:
         raise RuntimeError(f"Failed to load model from {model_path}: {e}")
 
+
 def scale(x):
     """Normalize input array using saved scaler."""
     return (x - SCALER_MEAN) / SCALER_SCALE
+
 
 # =============================================================================
 # Profile and level assignment
@@ -212,6 +404,7 @@ def assign_profile(f1v, f2v, f3v):
         return "Balanced", ""
     return "Transitional", ""
 
+
 def map_hl_level(f1v, f2v):
     thresholds = HL_THRESHOLDS
     if f1v < thresholds["low"]:
@@ -223,7 +416,6 @@ def map_hl_level(f1v, f2v):
     else:
         level = "High"
 
-    # Adjust for very negative F2 when F1 is low
     if f2v < -1.2 and f1v < 0.25:
         order = ["Low", "Basic", "Intermediate", "High"]
         idx = order.index(level)
@@ -231,16 +423,18 @@ def map_hl_level(f1v, f2v):
             level = order[idx - 1]
     return level
 
+
 def suitability(f1v, f2v, f3v):
     centroids = {
-        "Balanced":     np.array([ 1.5, 0.0, 0.0]),
-        "Transitional": np.array([-1.5, 0.0, 0.0]),
-        "Specialized":  np.array([ 0.0, 1.5, 1.0]),
+        "Balanced":     np.array([ 1.5,  0.0, 0.0]),
+        "Transitional": np.array([-1.5,  0.0, 0.0]),
+        "Specialized":  np.array([ 0.0,  1.5, 1.0]),
     }
     vec = np.array([f1v, f2v, f3v])
     raw = {p: 100.0 / (1.0 + float(np.linalg.norm(vec - c))) for p, c in centroids.items()}
     tot = sum(raw.values())
     return {p: round(s / tot * 100, 1) for p, s in raw.items()}
+
 
 # =============================================================================
 # Main analysis function
@@ -251,14 +445,13 @@ def analyse(text):
         raise ValueError("Text too short (minimum 20 characters).")
 
     cleaned = clean_text(text)
-    feat = extract_features(cleaned)
-    scores = aggregate_scores(feat)
-    x_norm = scale(scores).astype(np.float32)
-    x_t = torch.tensor(x_norm, dtype=torch.float32).to(DEVICE)
+    feat    = extract_features(cleaned)
+    scores  = aggregate_scores(feat)
+    x_norm  = scale(scores).astype(np.float32)
+    x_t     = torch.tensor(x_norm, dtype=torch.float32).to(DEVICE)
 
-    # Monte Carlo passes for uncertainty
     model = _BVAE_MODEL
-    model.train()  # to enable dropout for uncertainty estimation
+    model.train()  # enable dropout for MC uncertainty
     recons = []
     with torch.no_grad():
         for _ in range(MC_PASSES):
@@ -266,13 +459,12 @@ def analyse(text):
             recons.append(xh.cpu().numpy())
     sigma = float(np.stack(recons).std(axis=0).mean())
 
-    # Factor scores
     factors = (x_norm @ FACTOR_LOADINGS)[0]
     f1v, f2v, f3v = float(factors[0]), float(factors[1]), float(factors[2])
 
     profile, sub = assign_profile(f1v, f2v, f3v)
-    level = map_hl_level(f1v, f2v)
-    suit = suitability(f1v, f2v, f3v)
+    level   = map_hl_level(f1v, f2v)
+    suit    = suitability(f1v, f2v, f3v)
     raw_scores = {
         "FHL":  round(float(scores[0, 0]), 4),
         "CHL":  round(float(scores[0, 1]), 4),
@@ -282,103 +474,117 @@ def analyse(text):
     }
 
     return {
-        "profile": profile,
-        "sub_type": sub,
-        "hl_level": level,
-        "flagged": sigma > 0.5,
-        "sigma": round(sigma, 4),
-        "f1": round(f1v, 4),
-        "f2": round(f2v, 4),
-        "f3": round(f3v, 4),
+        "profile":    profile,
+        "sub_type":   sub,
+        "hl_level":   level,
+        "flagged":    sigma > 0.5,
+        "sigma":      round(sigma, 4),
+        "f1":         round(f1v, 4),
+        "f2":         round(f2v, 4),
+        "f3":         round(f3v, 4),
         "suitability": suit,
-        "raw_scores": raw_scores,
+        "raw_scores":  raw_scores,
     }
 
+
 # =============================================================================
-# ClarityConsensus agents
+# ClarityConsensus agents  (v2 — layered jargon detection)
 # =============================================================================
+_EXPLANATION_CUES = re.compile(
+    r'\(([^)]{5,})\)'
+    r'|,?\s*(also known as|defined as|refers to|meaning|i\.e\.)\s',
+    re.IGNORECASE,
+)
+
+_EXPLANATION_WINDOW = 120  # characters after a jargon span to look for a cue
+
+
 def clarity_consensus(text: str) -> dict:
     """
     Compute the ClarityConsensus score using four agents:
     Jargon, Explanation, Fluency, Coherence.
+
+    Jargon detection now uses all four layers:
+        Layer 1 — spaCy NER  (DISEASE / CHEMICAL / ENTITY)
+        Layer 2 — Morphological regex  (medical suffixes and prefixes)
+        Layer 3 — PhraseMatcher curated lexicon  (MEDICAL_LEXICON)
+        Layer 4 — Syllable count  (≥ SYLLABLE_THRESHOLD syllables)
     """
-    doc = nlp(text)
+    doc   = nlp(text)
     sents = list(doc.sents)
 
-    # ---- Agent 1: Jargon ---------------------------------------------------
-    EXPLANATION_CUES = re.compile(
-        r'\(([^)]{5,})\)'
-        r'|,?\s*(also known as|defined as|refers to|meaning|i\.e\.)\s',
-        re.IGNORECASE
-    )
-    med_terms = [e for e in doc.ents if e.label_ in MEDICAL_ENTITY_LABELS]
-    n_terms = len(med_terms)
+    # ---- Agent 1 & 2: Jargon + Explanation ---------------------------------
+    jargon_spans = _detect_jargon_spans(doc)  # {(start, end): layer}
+    n_terms = len(jargon_spans)
 
     explained = 0
-    for ent in med_terms:
-        window = text[ent.end_char: ent.end_char + 120]
-        if EXPLANATION_CUES.search(window):
+    for (start, end), layer in jargon_spans.items():
+        window = text[end: end + _EXPLANATION_WINDOW]
+        if _EXPLANATION_CUES.search(window):
             explained += 1
 
-    n_words = max(len([t for t in doc if not t.is_space]), 1)
-    jargon_raw = n_terms / n_words
+    n_words     = max(len([t for t in doc if not t.is_space]), 1)
     unexplained = max(n_terms - explained, 0)
-    jargon_score = 1.0 - min(1.0, unexplained / max(n_terms, 1))
-
-    # ---- Agent 2: Explanation coverage --------------------------------------
+    jargon_score      = 1.0 - min(1.0, unexplained / max(n_terms, 1))
     explanation_score = explained / max(n_terms, 1) if n_terms > 0 else 1.0
 
     # ---- Agent 3: Fluency ---------------------------------------------------
-    fre = textstat.flesch_reading_ease(text)
+    fre           = textstat.flesch_reading_ease(text)
     fluency_score = float(min(1.0, max(0.0, fre / 100.0)))
 
     # ---- Agent 4: Coherence -------------------------------------------------
-    coherence_score = 1.0
+    coherence_score     = 1.0
     flagged_transitions = []
     if len(sents) >= 2:
         sims = []
         for s1, s2 in zip(sents[:-1], sents[1:]):
-            v1 = s1.vector
-            v2 = s2.vector
-            n1 = np.linalg.norm(v1)
-            n2 = np.linalg.norm(v2)
+            v1, v2 = s1.vector, s2.vector
+            n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
             if n1 > 0 and n2 > 0:
                 sim = float(np.dot(v1, v2) / (n1 * n2))
                 sims.append(sim)
                 if sim < 0.55:
-                    flagged_transitions.append((str(s1)[:60], str(s2)[:60], round(sim, 3)))
+                    flagged_transitions.append(
+                        (str(s1)[:60], str(s2)[:60], round(sim, 3))
+                    )
         coherence_score = float(np.mean(sims)) if sims else 1.0
 
     # ---- Weighted final score ----------------------------------------------
     W_J, W_E, W_F, W_C = 0.40, 0.30, 0.15, 0.15
-    final = W_J * jargon_score + W_E * explanation_score + W_F * fluency_score + W_C * coherence_score
+    final = (W_J * jargon_score
+             + W_E * explanation_score
+             + W_F * fluency_score
+             + W_C * coherence_score)
+
+    # Layer breakdown: how many jargon hits came from each detection layer
+    layer_counts = {}
+    for layer in jargon_spans.values():
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
 
     return {
-        "final": round(final, 4),
-        "jargon": round(jargon_score, 4),
-        "explanation": round(explanation_score, 4),
-        "fluency": round(fluency_score, 4),
-        "coherence": round(coherence_score, 4),
-        "n_terms": n_terms,
-        "n_explained": explained,
-        "fre": round(fre, 2),
-        "flagged_transitions": flagged_transitions,
+        "final":                round(final, 4),
+        "jargon":               round(jargon_score, 4),
+        "explanation":          round(explanation_score, 4),
+        "fluency":              round(fluency_score, 4),
+        "coherence":            round(coherence_score, 4),
+        "n_terms":              n_terms,
+        "n_explained":          explained,
+        "fre":                  round(fre, 2),
+        "jargon_layer_counts":  layer_counts,   # NEW: transparency field
+        "flagged_transitions":  flagged_transitions,
     }
 
+
 # =============================================================================
-# Text annotation functions (for JSON output)
+# Text annotation functions (for JSON output)  (v2 — layered jargon)
 # =============================================================================
 def annotate_text(text: str):
     """Return list of (segment, dimension) for HL dimension highlighting."""
-    lower = text.lower()
-    n = len(text)
+    lower  = text.lower()
+    n      = len(text)
     labels = [None] * n
 
-    # Build flat term lists from regex patterns for each dimension.
-    # We extract literal terms by compiling each pattern and finding all
-    # matches in the lowercased text, then use those spans for labelling.
     P = HealthLiteracyPatterns
-
     dim_patterns = [
         ("CRHL", P.CAUSAL_PATTERNS + P.CONTRASTIVE_PATTERNS
                  + P.EVIDENCE_PATTERNS + P.OPTIONS_PATTERNS),
@@ -400,8 +606,7 @@ def annotate_text(text: str):
             except re.error:
                 continue
 
-    segments = []
-    i = 0
+    segments, i = [], 0
     while i < n:
         label = labels[i]
         j = i + 1
@@ -411,20 +616,28 @@ def annotate_text(text: str):
         i = j
     return segments
 
+
 def annotate_clarity(text: str):
-    """Return list of (segment, agent) for ClarityConsensus highlighting."""
-    doc = nlp(text)
-    n = len(text)
+    """
+    Return list of (segment, agent) for ClarityConsensus highlighting.
+
+    Jargon highlighting now uses the layered _detect_jargon_spans() helper,
+    replacing the previous NER-only approach.  Priority order for overlapping
+    spans: Jargon > Explanation > Coherence > Fluency.
+    """
+    doc    = nlp(text)
+    n      = len(text)
     labels = [None] * n
 
-    # Fluency: long words with ≥3 syllables
+    # ---- Fluency: long polysyllabic words ----------------------------------
     for token in doc:
-        if token.is_alpha and len(token.text) >= 7:
-            if textstat.syllable_count(token.text) >= 3:
+        if token.is_alpha and len(token.text) >= 6:
+            if textstat.syllable_count(token.text) >= _SYLLABLE_THRESHOLD:
                 for i in range(token.idx, min(token.idx + len(token.text), n)):
-                    labels[i] = "Fluency"
+                    if labels[i] is None:
+                        labels[i] = "Fluency"
 
-    # Coherence markers
+    # ---- Coherence markers -------------------------------------------------
     COHERENCE_MARKERS = {
         "however", "although", "though", "yet", "nevertheless", "furthermore",
         "moreover", "therefore", "thus", "hence", "consequently", "in contrast",
@@ -437,27 +650,26 @@ def annotate_clarity(text: str):
         pattern = re.compile(r'\b' + re.escape(marker) + r'\b')
         for m in pattern.finditer(lower):
             for i in range(m.start(), min(m.end(), n)):
-                labels[i] = "Coherence"
+                labels[i] = "Coherence"   # overrides Fluency
 
-    # Jargon: medical entities
-    for ent in doc.ents:
-        if ent.label_ in MEDICAL_ENTITY_LABELS:
-            for i in range(ent.start_char, min(ent.end_char, n)):
-                labels[i] = "Jargon"
-
-    # Explanation: parenthetical definitions or explanatory phrases
-    EXPLANATION_CUES = re.compile(
+    # ---- Explanation: parenthetical definitions ----------------------------
+    _EXP_CUES = re.compile(
         r'\(([^)]{5,})\)'
         r'|,?\s*(also known as|defined as|refers to|meaning|i\.e\.)[^,\.;]{0,80}',
-        re.IGNORECASE
+        re.IGNORECASE,
     )
-    for m in EXPLANATION_CUES.finditer(text):
+    for m in _EXP_CUES.finditer(text):
         for i in range(m.start(), min(m.end(), n)):
-            labels[i] = "Explanation"
+            labels[i] = "Explanation"   # overrides Coherence / Fluency
 
-    # Segment building
-    segments = []
-    i = 0
+    # ---- Jargon: all four layers (highest priority) -----------------------
+    jargon_spans = _detect_jargon_spans(doc)
+    for (start, end), _layer in jargon_spans.items():
+        for i in range(start, min(end, n)):
+            labels[i] = "Jargon"        # overrides everything
+
+    # ---- Segment building --------------------------------------------------
+    segments, i = [], 0
     while i < n:
         label = labels[i]
         j = i + 1
@@ -466,6 +678,7 @@ def annotate_clarity(text: str):
         segments.append((text[i:j], label))
         i = j
     return segments
+
 
 # =============================================================================
 # Guidance generation
@@ -477,12 +690,12 @@ GUIDANCE = {
             "Add causal reasoning (because, therefore, as a result)",
             "Include personal health context (diagnosis, duration, treatment)",
             "Reference credible sources (CDC, NHS, clinical guidelines)",
-            "Use contrastive connectives (however, although, despite)"
+            "Use contrastive connectives (however, although, despite)",
         ],
         "reduce": [
             "Avoid very short, fragmented sentences",
             "Reduce over-reliance on questions without context",
-            "Limit informal/colloquial phrasing"
+            "Limit informal/colloquial phrasing",
         ],
     },
     ("Transitional", "Specialized"): {
@@ -490,11 +703,11 @@ GUIDANCE = {
             "Cite specific databases or journals (PubMed, Lancet, JAMA) for Digital sub-type",
             "Describe your personal condition in rich detail for Functional sub-type",
             "Reference multiple treatment options and compare them",
-            "Use evidence markers (systematic review, meta-analysis, clinical trial)"
+            "Use evidence markers (systematic review, meta-analysis, clinical trial)",
         ],
         "reduce": [
             "Reduce vague or unspecified claims",
-            "Avoid generic statements without data or context"
+            "Avoid generic statements without data or context",
         ],
     },
     ("Balanced", "Specialized"): {
@@ -502,11 +715,11 @@ GUIDANCE = {
             "Cite specific studies, DOIs, or clinical databases (for Digital sub-type)",
             "Add detailed first-person narrative of lived experience (for Functional sub-type)",
             "Push F2 digital factor above 1.0 by referencing credible online sources",
-            "Push F3 applied factor above 0.8 with concrete application of knowledge"
+            "Push F3 applied factor above 0.8 with concrete application of knowledge",
         ],
         "reduce": [
             "Balance — being Specialized is niche, not always better",
-            "Reduce generic breadth if targeting a specific expertise axis"
+            "Reduce generic breadth if targeting a specific expertise axis",
         ],
     },
     ("Specialized", "Balanced"): {
@@ -514,40 +727,43 @@ GUIDANCE = {
             "Broaden across all 5 HL dimensions",
             "Add communicative context (questions, modal verbs, conditionals)",
             "Include both evidence references AND personal application",
-            "Use hedging language to signal nuanced reasoning"
+            "Use hedging language to signal nuanced reasoning",
         ],
         "reduce": [
             "Reduce over-reliance on a single dimension (digital or applied)",
-            "Avoid purely academic or purely personal framing"
+            "Avoid purely academic or purely personal framing",
         ],
     },
     ("Balanced", "Transitional"): {
         "elevate": [],
         "reduce": [
             "Note: Transitional represents lower overall literacy — moving here is a downgrade",
-            "Simplify vocabulary, reduce sentence complexity, remove evidence references if targeting a lay audience"
+            "Simplify vocabulary, reduce sentence complexity, remove evidence references "
+            "if targeting a lay audience",
         ],
     },
     ("Specialized", "Transitional"): {
         "elevate": [],
         "reduce": [
             "Note: Transitional represents lower overall literacy",
-            "Remove technical references, simplify to plain language if targeting a general audience"
+            "Remove technical references, simplify to plain language if targeting a general audience",
         ],
     },
 }
+
 
 def get_guidance(current, target):
     """Return guidance dictionary for moving from current to target profile."""
     return GUIDANCE.get((current, target), {
         "elevate": [
             "Improve overall medical vocabulary and sentence structure",
-            "Add more contextual reasoning and evidence references"
+            "Add more contextual reasoning and evidence references",
         ],
         "reduce": [
-            "Reduce elements that push toward the current profile"
+            "Reduce elements that push toward the current profile",
         ],
     })
+
 
 # =============================================================================
 # Public API
@@ -557,48 +773,41 @@ def analyze_health_literacy(text, model_path=None):
     Analyze health literacy of a text and return a comprehensive result dictionary.
 
     Parameters:
-        text (str): The health‑related text to analyze.
+        text (str): The health-related text to analyze.
         model_path (str, optional): Path to the BVAE model checkpoint.
-            Defaults to "./hl_bvae_model.pt".
+            Defaults to MODEL_PATH_DEFAULT.
 
     Returns:
         dict: A dictionary containing all analysis results (profile, scores,
               annotations, guidance). Ready to be serialized to JSON.
+              New field in v2: clarity_consensus.jargon_layer_counts — breaks
+              down how many jargon hits came from each detection layer.
 
     Raises:
         ValueError: If text is too short.
         RuntimeError: If model loading fails.
     """
-    # Ensure model is loaded
     _load_model(model_path)
 
-    # Run main analysis
-    result = analyse(text)
-
-    # Compute clarity consensus
+    result  = analyse(text)
     clarity = clarity_consensus(text)
 
-    # Generate annotations
-    hl_annotations = annotate_text(text)
+    hl_annotations      = annotate_text(text)
     clarity_annotations = annotate_clarity(text)
 
-    # Generate guidance for other profiles
     current_profile = result["profile"]
-    guidance = {}
-    for target in ["Balanced", "Transitional", "Specialized"]:
-        if target != current_profile:
-            guidance[target] = get_guidance(current_profile, target)
+    guidance = {
+        target: get_guidance(current_profile, target)
+        for target in ("Balanced", "Transitional", "Specialized")
+        if target != current_profile
+    }
 
-    # Build final output
-    output = {
+    return {
         **result,
         "clarity_consensus": clarity,
         "annotations": {
-            "hl_dimensions": hl_annotations,
+            "hl_dimensions":  hl_annotations,
             "clarity_agents": clarity_annotations,
         },
         "guidance": guidance,
     }
-    return output
-
- 
