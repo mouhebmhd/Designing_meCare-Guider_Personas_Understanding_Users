@@ -85,8 +85,40 @@ CLARITY_ANNOTATION_COLOURS = {
     "Explanation": {"color": "#8b5cf6", "label": "Explanation — inline definition",  "bg": "rgba(139,92,246,0.15)"},
     "Coherence":   {"color": "#f59e0b", "label": "Coherence — discourse connective", "bg": "rgba(245,158,11,0.15)"},
     "Fluency":     {"color": "#06b6d4", "label": "Fluency — complex long word",      "bg": "rgba(6,182,212,0.15)"},
+    "Quantity": {"color": "#10b981", "label": "Quantity — medical dose / unit", "bg": "rgba(16,185,129,0.15)"},
+
+}
+# =============================================================================
+# PERSONA MARKER COLOURS
+# =============================================================================
+BALANCED_MARKER_COLOURS = {
+    "EVIDENCE":        {"color": "#3b82f6", "badge": "EVD",  "label": "[EVIDENCE] — cites source / trial",          "bg": "rgba(59,130,246,0.15)"},
+    "TRADEOFF":        {"color": "#f97316", "badge": "TRD",  "label": "[TRADEOFF] — pros / cons presented",         "bg": "rgba(249,115,22,0.15)"},
+    "UNCERTAINTY":     {"color": "#a855f7", "badge": "UNC",  "label": "[UNCERTAINTY] — ambiguity acknowledged",     "bg": "rgba(168,85,247,0.15)"},
+    "SHARED_DECISION": {"color": "#06b6d4", "badge": "SDM",  "label": "[SHARED_DECISION] — participatory framing",  "bg": "rgba(6,182,212,0.15)"},
+    "COMPARISON":      {"color": "#eab308", "badge": "CMP",  "label": "[COMPARISON] — side-by-side comparison",     "bg": "rgba(234,179,8,0.15)"},
+    "PRIMARY_SOURCE":  {"color": "#22c55e", "badge": "SRC",  "label": "[PRIMARY_SOURCE] — guideline / trial link",  "bg": "rgba(34,197,94,0.15)"},
 }
 
+TRANSITIONAL_MARKER_COLOURS = {
+    "ACRONYM":          {"color": "#f43f5e", "badge": "ACR",  "label": "[ACRONYM] — abbreviation to spell out",       "bg": "rgba(244,63,94,0.15)"},
+    "METAPHOR":         {"color": "#f97316", "badge": "MET",  "label": "[METAPHOR] — analogy / plain comparison",     "bg": "rgba(249,115,22,0.15)"},
+    "TEACH_BACK":       {"color": "#8b5cf6", "badge": "TBK",  "label": "[TEACH_BACK] — comprehension check prompt",   "bg": "rgba(139,92,246,0.15)"},
+    "EMOTION_VALIDATE": {"color": "#06b6d4", "badge": "EMO",  "label": "[EMOTION_VALIDATE] — acknowledge feeling",    "bg": "rgba(6,182,212,0.15)"},
+    "STEP":             {"color": "#22c55e", "badge": "STP",  "label": "[STEP] — numbered single-idea step",          "bg": "rgba(34,197,94,0.15)"},
+    "SIMPLE_SENTENCE":  {"color": "#ef4444", "badge": "SPL",  "label": "[SPLIT] — sentence exceeds 20 words",         "bg": "rgba(239,68,68,0.12)"},
+    "LAY_LINK":         {"color": "#eab308", "badge": "LLK",  "label": "[LAY_LINK] — vetted plain-language resource", "bg": "rgba(234,179,8,0.15)"},
+}
+
+SPECIALIZED_MARKER_COLOURS = {
+    "FULL_CITATION":      {"color": "#3b82f6", "badge": "CIT",  "label": "[FULL_CITATION] — DOI / PMID reference",           "bg": "rgba(59,130,246,0.15)"},
+    "ADVANCED_FILTER":   {"color": "#a855f7", "badge": "ADV",  "label": "[ADVANCED_FILTER] — PICO / structured search",     "bg": "rgba(168,85,247,0.15)"},
+    "BRIDGE_TO_SELF":    {"color": "#06b6d4", "badge": "BTS",  "label": "[BRIDGE_TO_SELF] — evidence → personal context",   "bg": "rgba(6,182,212,0.15)"},
+    "VALIDATE_NARRATIVE":{"color": "#f97316", "badge": "VNR",  "label": "[VALIDATE_NARRATIVE] — affirm lived experience",   "bg": "rgba(249,115,22,0.15)"},
+    "STORY_FORMAT":      {"color": "#eab308", "badge": "STR",  "label": "[STORY_FORMAT] — narrative framing",               "bg": "rgba(234,179,8,0.15)"},
+    "GENTLE_EVIDENCE":   {"color": "#22c55e", "badge": "GEV",  "label": "[GENTLE_EVIDENCE] — soft evidence introduction",   "bg": "rgba(34,197,94,0.15)"},
+    "HIGH_UNCERTAINTY":  {"color": "#ef4444", "badge": "HUN",  "label": "[HIGH_UNCERTAINTY] — needs human review",          "bg": "rgba(239,68,68,0.15)"},
+}
 DIMENSION_COLOURS = {
     "FHL":  {"color": "#3b82f6", "label": "Functional HL",    "bg": "rgba(59,130,246,0.15)"},
     "CHL":  {"color": "#eab308", "label": "Communicative HL", "bg": "rgba(234,179,8,0.15)"},
@@ -503,7 +535,7 @@ def _detect_jargon_spans(doc) -> dict[tuple[int, int], str]:
             and textstat.syllable_count(token.text) >= _SYLLABLE_THRESHOLD
         ):
             _mark(token.idx, token.idx + len(token.text), "syllable")
-
+    
     return _merge_consecutive_spans(spans, doc.text)
 
 
@@ -710,8 +742,576 @@ _EXPLANATION_CUES = re.compile(
     re.IGNORECASE,
 )
 _EXPLANATION_WINDOW = 120
+_MEDICAL_QUANTITY_RE = re.compile(
+    r'\b'
+    r'(?:'
+        # ── numeric value (optionally a range: 10-20 or 10 to 20) ────────────
+        r'\d+(?:[.,]\d+)?'
+        r'(?:\s*(?:[-–]|to)\s*\d+(?:[.,]\d+)?)?'
+    r')'
+    r'\s*'
+    r'(?:'
+        # ── mass / concentration ─────────────────────────────────────────────
+        r'mg(?:/(?:dL|mL|kg|L|m²|day|dose))?'
+        r'|mcg(?:/(?:kg|mL|day))?'
+        r'|[µμ]g(?:/(?:kg|mL|day))?'
+        r'|g(?:/(?:dL|L|mL|kg|day))?'
+        r'|kg'
+        r'|mEq(?:/L)?'
+        r'|mmol(?:/L)?'
+        r'|mol(?:/L)?'
+        r'|nmol(?:/L)?'
+        r'|pmol(?:/L)?'
+        # ── activity / biological units ───────────────────────────────────────
+        r'|IU(?:/(?:mL|L|kg|day))?'
+        r'|units?(?:/(?:kg|mL|day))?'
+        r'|[Uu]\b'
+        # ── volume ────────────────────────────────────────────────────────────
+        r'|m[Ll](?:/(?:kg|hr|min|h))?'
+        r'|[Ll]\b'
+        r'|dL'
+        r'|cc'
+        # ── pressure / rate / temperature ─────────────────────────────────────
+        r'|mmHg'
+        r'|cmH2O'
+        r'|bpm'
+        r'|°[CcFf]'
+        # ── dose forms ────────────────────────────────────────────────────────
+        r'|tablets?|tabs?'
+        r'|capsules?|caps?'
+        r'|pills?'
+        r'|drops?|gtts?'
+        r'|puffs?'
+        r'|sprays?'
+        r'|patches?'
+        r'|suppositories?|suppository'
+        r'|teaspoons?|tablespoons?|tsp\.?|tbsp\.?'
+        r'|vials?|ampoules?|ampules?'
+        # ── time-dose fractions (e.g. "twice", "three times" before "daily") ─
+        r'|%'
+    r')\b',
+    re.IGNORECASE,
+)
+# =============================================================================
+# PERSONA MARKER DETECTION PATTERNS
+# =============================================================================
 
+# ── Balanced ──────────────────────────────────────────────────────────────────
+_BALANCED_PATTERNS: dict[str, re.Pattern] = {
+    "PRIMARY_SOURCE": re.compile(
+    r'\b(?:'
+    
+    # --- Identifiers ---
+    r'PMID\s*:?\s*\d{7,9}'
+    r'|PMCID\s*:?\s*PMC\d+'
+    r'|DOI\s*:?\s*10\.\d{4,9}/[-._;()/:A-Z0-9]+'
+    r'|10\.\d{4,9}/[-._;()/:A-Z0-9]+'  # bare DOI
+    r'|arXiv\s*:?\s*\d{4}\.\d{4,5}(?:v\d+)?'
+    
+    # --- Clinical trial registries ---
+    r'|NCT\s*\d{8}'
+    r'|EudraCT\s*\d{4}-\d{6}-\d{2}'
+    r'|ISRCTN\s*\d+'
+    r'|clinical\s*trials?\.gov'
+    r'|trialregister\.eu'
+    r'|isrctn\.com'
+    
+    # --- Databases / repositories ---
+    r'|pubmed(?:\.ncbi)?'
+    r'|ncbi\.nlm\.nih\.gov'
+    r'|medline'
+    r'|embase'
+    r'|scopus'
+    r'|web\s+of\s+science'
+    r'|cochrane(?:\s+library)?'
+    
+    # --- Preprint servers ---
+    r'|medrxiv'
+    r'|biorxiv'
+    r'|ssrn'
+    r'|researchsquare'
+    
+    # --- Publishers / journals ---
+    r'|thelancet'
+    r'|new\s+england\s+journal\s+of\s+medicine'
+    r'|nejm'
+    r'|jama'
+    r'|bmj'
+    r'|nature'
+    r'|science(?:\s+magazine)?'
+    r'|plos\s+one'
+    r'|elsevier'
+    r'|springer'
+    r'|wiley'
+    r'|taylor\s*&\s*francis'
+    
+    # --- Health organizations & guidelines ---
+    r'|(?:ACC|AHA|ESC|NICE|WHO|CDC|USPSTF|EMA|FDA|NIH|NHS)'
+    r'(?:\s+(?:20\d{2}))?\s+guideline[s]?'
+    r'|guideline[s]?\s+(?:from|by|per)\s+'
+    r'(?:ACC|AHA|ESC|NICE|WHO|CDC|USPSTF|EMA|FDA|NIH|NHS)'
+    r'|recommendation[s]?\s+(?:from|by)\s+'
+    r'(?:ACC|AHA|ESC|NICE|WHO|CDC|USPSTF|EMA|FDA)'
+    r'|consensus\s+(?:statement|report)'
+    r'|position\s+statement'
+    
+    # --- URLs (broad scientific domains) ---
+    r'|(?:https?://)?(?:www\.)?'
+    r'(?:pubmed\.ncbi\.nlm\.nih\.gov'
+    r'|doi\.org'
+    r'|cochranelibrary\.com'
+    r'|thelancet\.com'
+    r'|nejm\.org'
+    r'|jamanetwork\.com'
+    r'|bmj\.com'
+    r'|nature\.com'
+    r'|science\.org)'
+    
+    r')\b',
+    re.IGNORECASE,
+)
+   , 
+   "EVIDENCE": re.compile(
+    r'\b(?:'
+    
+    # --- Attribution / evidence phrasing ---
+    r'according\s+to'
+    r'|per\s+(?:the\s+)?(?:20\d{2}|19\d{2})'
+    r'|based\s+on\s+(?:a\s+)?(?:study|trial|review|analysis|data)'
+    r'|evidence\s+(?:suggests|shows|indicates|demonstrates)'
+    r'|data\s+(?:suggest|show|indicate|demonstrate)'
+    r'|findings\s+(?:suggest|show|indicate|demonstrate)'
+    
+    # --- Publication / journal mentions ---
+    r'|published\s+in\s+(?:the\s+)?'
+    r'(?:JAMA|NEJM|Lancet|BMJ|Circulation|JACC|N\s*Engl\s*J\s*Med|Nature|Science)'
+    r'|(?:JAMA|NEJM|Lancet|BMJ|Circulation|JACC|Nature|Science)\s+(?:20\d{2}|19\d{2})'
+    
+    # --- Study designs ---
+    r'|randomi[sz](?:ed|ation|ing)?'
+    r'|RCTs?'
+    r'|controlled\s+trial'
+    r'|clinical\s+trial'
+    r'|phase\s+[I|II|III|IV]+'
+    r'|double[-\s]?blind'
+    r'|placebo[-\s]?controlled'
+    r'|cohort\s+study'
+    r'|case[-\s]?control\s+study'
+    r'|cross[-\s]?sectional\s+study'
+    r'|observational\s+study'
+    r'|prospective\s+study'
+    r'|retrospective\s+study'
+    
+    # --- Evidence synthesis ---
+    r'|meta[-\s]?analysis'
+    r'|systematic\s+review'
+    r'|pooled\s+analysis'
+    
+    # --- Statistical terms ---
+    r'|absolute\s+risk\s+reduction'
+    r'|relative\s+risk'
+    r'|risk\s+ratio'
+    r'|hazard\s+ratio'
+    r'|odds\s+ratio'
+    r'|rate\s+ratio'
+    r'|confidence\s+intervals?'
+    r'|CI\s*\(?\d{1,2}%\)?'
+    r'|p\s*[<=>]\s*0?\.\d+'
+    r'|statistically\s+significant'
+    r'|effect\s+size'
+    
+    # --- Clinical metrics ---
+    r'|number\s+needed\s+to\s+treat'
+    r'|number\s+needed\s+to\s+harm'
+    r'|NNT|NNH'
+    r'|incidence'
+    r'|prevalence'
+    r'|mortality'
+    r'|morbidity'
+    
+    # --- Reporting verbs ---
+    r'|(?:study|trial|analysis|review)\s+(?:found|showed|demonstrated|reported|concluded|revealed)'
+    r'|results\s+(?:showed|demonstrated|indicated|suggested)'
+    r'|authors\s+(?:reported|concluded|found)'
+    
+    r')\b',
+    re.IGNORECASE,
+),
+    "UNCERTAINTY": re.compile(
+    r'\b(?:'
+    
+    # --- Core uncertainty / controversy ---
+    r'debat(?:ed|able)'
+    r'|controvers(?:ial|y)'
+    r'|remains?\s+(?:unclear|uncertain|controversial|unknown)'
+    r'|uncertain(?:ty)?'
+    r'|unclear'
+    r'|unknown'
+    r'|inconclusive'
+    r'|equivocal'
+    
+    # --- Evidence quality issues ---
+    r'|evidence\s+is\s+(?:limited|mixed|conflicting|emerging|insufficient|weak|scarce)'
+    r'|data\s+(?:are|is)\s+(?:limited|scarce|insufficient|inconclusive)'
+    r'|lack\s+of\s+(?:evidence|data)'
+    r'|paucity\s+of\s+(?:data|evidence)'
+    
+    # --- Lack of consensus ---
+    r'|no\s+(?:clear\s+)?consensus'
+    r'|consensus\s+(?:is\s+)?lacking'
+    r'|experts?\s+(?:disagree|are\s+divided)'
+    r'|opinions?\s+(?:vary|differ)'
+    
+    # --- Guidelines variability ---
+    r'|guidelines?\s+(?:vary|differ|are\s+inconsistent|are\s+conflicting)'
+    r'|guidelines?\s+(?:do\s+not\s+specify|provide\s+no\s+clear\s+recommendation)'
+    
+    # --- Unknown / not established ---
+    r'|not\s+(?:yet\s+)?(?:fully\s+)?(?:known|established|proven|confirmed|clear|understood)'
+    r'|remains?\s+to\s+be\s+(?:determined|established|clarified)'
+    
+    # --- Optimal strategy unclear ---
+    r'|optimal\s+(?:duration|dose|timing|strategy|approach|management)'
+    r'\s+(?:is\s+)?(?:debated|unclear|unknown|not\s+established)'
+    
+    # --- Study limitations / bias ---
+    r'|limited\s+by\s+(?:small\s+sample\s+size|bias|confounding|short\s+follow-?up)'
+    r'|subject\s+to\s+(?:bias|confounding)'
+    r'|potential\s+(?:bias|confounding|measurement\s+error)'
+    r'|heterogene(?:ity|ous)'
+    
+    # --- Statistical uncertainty ---
+    r'|not\s+statistically\s+significant'
+    r'|failed\s+to\s+reach\s+statistical\s+significance'
+    r'|wide\s+confidence\s+intervals?'
+    
+    # --- Hedging / cautious language ---
+    r'|may\s+(?:suggest|indicate|reflect|be|represent)'
+    r'|might\s+(?:suggest|indicate|reflect|be)'
+    r'|could\s+(?:suggest|indicate|reflect|be)'
+    r'|appears?\s+to\s+(?:suggest|indicate|be)'
+    r'|suggests?\s+(?:a\s+)?possible'
+    r'|potential(?:ly)?'
+    
+    # --- Need for more research ---
+    r'|further\s+(?:studies|research)\s+(?:are\s+)?needed'
+    r'|additional\s+(?:studies|research)\s+(?:are\s+)?required'
+    r'|warrant(?:s|ed)?\s+further\s+(?:investigation|study)'
+    
+    # --- General insufficiency statements ---
+    r'|insufficient\s+(?:evidence|data)\s+to'
+    r'|cannot\s+(?:be\s+)?(?:determined|concluded|established)'
+    
+    r')\b',
+    re.IGNORECASE,
+),
+    "TRADEOFF": re.compile(
+    r'\b(?:'
+    
+    # --- Explicit benefit vs risk ---
+    r'benefit[s]?\s+(?:and|vs\.?|versus)\s+risk[s]?'
+    r'|risk[s]?\s+(?:and|vs\.?|versus)\s+benefit[s]?'
+    r'|risk[-\s]?benefit\s+(?:ratio|profile|balance|analysis)'
+    
+    # --- General tradeoff language ---
+    r'|pros?\s+and\s+cons?'
+    r'|trade[-\s]?off[s]?'
+    r'|cost[-\s]?benefit\s+(?:analysis|ratio|balance)'
+    r'|benefit[-\s]?cost\s+(?:ratio|analysis)'
+    
+    # --- Weighing / balancing ---
+    r'|weigh(?:ing)?\s+(?:the\s+)?(?:risks?|benefits?|options|trade[-\s]?offs)'
+    r'|balance(?:ing)?\s+(?:the\s+)?(?:risks?|benefits?|harms?)'
+    r'|consider(?:ing)?\s+(?:the\s+)?(?:risks?|benefits?)'
+    
+    # --- Contrast connectors ---
+    r'|on\s+the\s+(?:other|flip)\s+(?:hand|side)'
+    r'|however'
+    r'|nevertheless'
+    r'|nonetheless'
+    r'|while\s+.*?\b(?:increase|decrease|improve|reduce)'
+    
+    # --- But / contrast patterns ---
+    r'|(?:improves?|reduces?|lowers?|decreases?)\s+[^.]{0,80}?\bbut\b'
+    r'|\bbut\b[^.]{0,80}?(?:increases?|raises?|worsens?|reduces?)'
+    
+    # --- At the expense of ---
+    r'|at\s+the\s+expense\s+of'
+    r'|comes?\s+with\s+(?:a\s+)?cost'
+    r'|associated\s+with\s+(?:increased\s+)?risk'
+    
+    # --- Adverse effects vs benefit ---
+    r'|(?:side\s+effects?|adverse\s+(?:effects?|events)|toxicity)'
+    r'\s+(?:may\s+)?(?:increase|worsen|occur)'
+    r'|efficacy\s+(?:versus|vs\.?)\s+(?:safety|toxicity)'
+    r'|safety\s+(?:versus|vs\.?)\s+efficacy'
+    
+    # --- Increase one thing, decrease another ---
+    r'|(?:increase|improve|reduce|decrease)\s+\w+'
+    r'\s+(?:while|but)\s+(?:increasing|reducing|worsening|affecting)\s+\w+'
+    
+    # --- Outcome contrasts ---
+    r'|(?:reduces?\s+mortality\s+but\s+increases?\s+morbidity)'
+    r'|(?:improves?\s+survival\s+but\s+worsens?\s+quality\s+of\s+life)'
+    
+    # --- Double-edged phrasing ---
+    r'|double[-\s]?edged'
+    r'|mixed\s+(?:benefits?|effects?|outcomes)'
+    
+    # --- Time / cost / burden tradeoffs ---
+    r'|short[-\s]?term\s+(?:benefit|gain).{0,40}long[-\s]?term\s+(?:risk|cost)'
+    r'|higher\s+cost\s+but\s+(?:better|improved)\s+outcomes'
+    r'|lower\s+cost\s+but\s+(?:reduced|worse)\s+efficacy'
+    
+    r')\b',
+    re.IGNORECASE,
+),
+    "SHARED_DECISION": re.compile(
+    r'\b(?:'
+    
+    # --- Direct preference questions ---
+    r'would\s+you\s+(?:like|prefer|want)'
+    r'|do\s+you\s+(?:want|prefer|have\s+a\s+preference)'
+    r'|which\s+(?:option|approach|treatment)\s+do\s+you\s+(?:prefer|feel\s+more\s+comfortable\s+with)'
+    r'|how\s+do\s+you\s+feel\s+about'
+    
+    # --- Patient values / preferences ---
+    r'|(?:your|the\s+patient[\'’]s?)\s+(?:preference|preferences|values?|goals?)'
+    r'|patient\s+(?:choice|preference|values?|goals?)'
+    r'|align(?:ing)?\s+with\s+(?:your|patient)\s+(?:values?|goals?)'
+    r'|what\s+matters\s+(?:most\s+)?to\s+you'
+    r'|what\s+is\s+important\s+to\s+you'
+    
+    # --- Shared decision making explicit ---
+    r'|shared\s+decision(?:[-\s]?making)?'
+    r'|decision\s+(?:making|process)\s+(?:together|jointly|collaboratively)'
+    r'|collaborative\s+decision(?:[-\s]?making)?'
+    
+    # --- Collaborative phrasing ---
+    r'|together\s+(?:we\s+can\s+)?(?:decide|discuss|choose|weigh|review|consider)'
+    r'|we\s+can\s+(?:decide|discuss|review|consider|choose)\s+together'
+    r'|let\s+us\s+(?:decide|discuss|review|consider)\s+together'
+    
+    # --- Offering options / discussion ---
+    r'|(?:would|shall)\s+(?:you\s+)?like\s+to\s+'
+    r'(?:see|discuss|go\s+over|review|consider|talk\s+about)\s+'
+    r'(?:the\s+)?(?:options?|choices?|alternatives?|numbers?|data)'
+    r'|here\s+are\s+(?:the\s+)?options'
+    r'|there\s+are\s+(?:several|different)\s+(?:options|approaches|treatments)'
+    
+    # --- Explaining tradeoffs to patient ---
+    r'|we\s+can\s+(?:weigh|balance)\s+(?:the\s+)?(?:risks?|benefits?|pros?\s+and\s+cons)'
+    r'|let\'?s\s+(?:weigh|review|go\s+over)\s+(?:the\s+)?(?:risks?|benefits?|options)'
+    
+    # --- Consent / agreement language ---
+    r'|do\s+you\s+agree'
+    r'|are\s+you\s+comfortable\s+with'
+    r'|does\s+that\s+sound\s+acceptable'
+    r'|is\s+that\s+okay\s+with\s+you'
+    
+    # --- Decision support / aids ---
+    r'|decision\s+aid'
+    r'|we\s+can\s+use\s+(?:a\s+)?decision\s+tool'
+    r'|let\s+me\s+explain\s+(?:the\s+)?(?:options?|risks?|benefits?)\s+so\s+you\s+can\s+decide'
+    
+    r')\b',
+    re.IGNORECASE,
+),
+    "COMPARISON": re.compile(
+    r'\b(?:'
+    
+    # --- Explicit vs / versus ---
+    r'\w+(?:\s+\w+){0,3}\s+vs\.?\s+\w+(?:\s+\w+){0,3}'
+    r'|\w+(?:\s+\w+){0,3}\s+versus\s+\w+(?:\s+\w+){0,3}'
+    
+    # --- Compared to / with ---
+    r'|compared?\s+(?:to|with)\s+\w+(?:\s+\w+){0,3}'
+    r'|\w+(?:\s+\w+){0,3}\s+compared?\s+(?:to|with)\s+\w+(?:\s+\w+){0,3}'
+    
+    # --- Superiority / inferiority ---
+    r'|(?:more|less|as\s+effective\s+as|superior\s+to|inferior\s+to)'
+    r'\s+\w+(?:\s+\w+){0,3}'
+    r'|\w+(?:\s+\w+){0,3}\s+(?:is|are)\s+(?:more|less|as\s+effective\s+as|superior|inferior)\s+than'
+    
+    # --- Outcome comparisons ---
+    r'|(?:higher|lower|increased|decreased)\s+(?:risk|mortality|morbidity|efficacy|effectiveness|cost|rate)'
+    r'\s+than\s+\w+(?:\s+\w+){0,3}'
+    
+    # --- Effectiveness / safety comparisons ---
+    r'|(?:more|less)\s+(?:effective|safe|tolerable|cost[-\s]?effective|convenient)'
+    r'\s+than\s+\w+(?:\s+\w+){0,3}'
+    
+    # --- Side-by-side / direct comparison ---
+    r'|side[-\s]?by[-\s]?side'
+    r'|head[-\s]?to[-\s]?head'
+    
+    # --- Alternatives framing ---
+    r'|alternative[s]?\s+(?:include|to|for|are|such\s+as)'
+    r'|options?\s+(?:include|are|such\s+as)'
+    
+    # --- Treatment hierarchy ---
+    r'|(?:first|second|third)[-\s]?line\s+(?:option|therapy|treatment|agent|therapy)'
+    r'|standard\s+of\s+care\s+(?:vs|versus|compared\s+to)'
+    
+    # --- Differences explicitly stated ---
+    r'|difference[s]?\s+between\s+\w+(?:\s+\w+){0,3}\s+and\s+\w+(?:\s+\w+){0,3}'
+    r'|distinction\s+between\s+\w+\s+and\s+\w+'
+    
+    # --- Both / dual comparison structures ---
+    r'|both\s+\w+(?:\s+\w+){0,3}\s+and\s+\w+(?:\s+\w+){0,3}\s+(?:have|are|show|reduce|increase)'
+    
+    # --- Ranking language ---
+    r'|(?:better|worse)\s+than'
+    r'|most\s+(?:effective|safe|commonly\s+used)'
+    
+    # --- Statistical comparisons ---
+    r'|significantly\s+(?:higher|lower|better|worse)\s+than'
+    r'|relative\s+(?:risk|reduction|difference)'
+    r'|hazard\s+ratio'
+    r'|odds\s+ratio'
+    
+    # --- Comparative verbs ---
+    r'|outperforms?\s+\w+(?:\s+\w+){0,3}'
+    r'|\w+(?:\s+\w+){0,3}\s+outperforms?\s+\w+'
+    
+    r')\b',
+    re.IGNORECASE,
+),
+}
+# Process PRIMARY_SOURCE before EVIDENCE (more specific first)
+_BALANCED_PATTERN_ORDER = ["PRIMARY_SOURCE", "EVIDENCE", "UNCERTAINTY",
+                            "TRADEOFF", "SHARED_DECISION", "COMPARISON"]
 
+# ── Transitional ──────────────────────────────────────────────────────────────
+_ACRONYM_RE = re.compile(r'\b[A-Z]{2,5}\b')
+# ── Transitional ──────────────────────────────────────────────────────────────
+### MARK HERE ###
+_TRANSITIONAL_PATTERNS: dict[str, re.Pattern] = {
+    "TEACH_BACK": re.compile(
+        r'\b(?:tell\s+me\s+(?:back\s+)?in\s+your\s+own\s+words'
+        r'|can\s+you\s+(?:explain|describe|tell\s+me)\s+(?:back\s+)?(?:what|how)'
+        r'|what\s+(?:would|will)\s+you\s+do\s+if'
+        r'|how\s+(?:would|will)\s+you\s+(?:know|remember)\s+(?:when|if|to)'
+        r'|in\s+your\s+own\s+words'
+        r'|to\s+make\s+sure\s+(?:I\'?ve?\s+)?explained\s+(?:this\s+)?clearly'
+        r'|checking?\s+(?:your\s+)?understanding)',
+        re.IGNORECASE,
+    ),
+    "EMOTION_VALIDATE": re.compile(
+        r'\b(?:it(?:\'s|\s+is)\s+(?:normal|natural|understandable|okay|ok|common)\s+to\s+(?:feel|worry|be\s+concerned)'
+        r'|makes?\s+(?:complete\s+)?sense\s+(?:to\s+feel|that\s+you(?:\s+feel|\s+are)?)'
+        r'|(?:many|most)\s+people\s+(?:feel|worry|are)\s+(?:the\s+same|worried|anxious|scared|nervous)'
+        r'|your\s+(?:concern|worry|fear|anxiety)\s+is\s+(?:valid|understandable|normal|completely\s+understandable)'
+        r'|(?:I\s+)?understand\s+(?:that\s+)?this\s+(?:is|can\s+be)\s+(?:scary|worrying|difficult|overwhelming|a\s+lot\s+to\s+take\s+in)'
+        r'|it(?:\'s|\s+is)\s+(?:okay|ok|fine|perfectly\s+(?:okay|normal))\s+to\s+feel)',
+        re.IGNORECASE,
+    ),
+    "METAPHOR": re.compile(
+        r'\b(?:like\s+a[n]?\s+\w'
+        r'|think\s+of\s+(?:it\s+)?(?:as|like)\s+'
+        r'|imagine\s+(?:your|a[n]?\s+|the\s+)'
+        r'|just\s+like\s+(?:a[n]?\s+)\w'
+        r'|(?:acts?|works?|functions?|behaves?)\s+like\s+a[n]?\s+'
+        r'|(?:your|the)\s+\w+\s+is\s+like\s+a[n]?\s+'
+        r'|similar\s+to\s+(?:a[n]?\s+|the\s+)\w'
+        r'|picture\s+(?:it|your|a[n]?))',
+        re.IGNORECASE,
+    ),
+    "STEP": re.compile(
+        r'(?:\bstep\s+\d+\b'
+        r'|\bfirst(?:ly)?[,:]?\s+\w'
+        r'|\bsecond(?:ly)?[,:]?\s+\w'
+        r'|\bthird(?:ly)?[,:]?\s+\w'
+        r'|\bfinally[,:]?\s+\w'
+        r'|\blastly[,:]?\s+\w'
+        r'|^\s*\d+[.)]\s+\w)',
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    "LAY_LINK": re.compile(
+        r'\b(?:mayo\s+clinic'
+        r'|webmd\b'
+        r'|nhs\.uk|nhs\s+website'
+        r'|medlineplus'
+        r'|healthline\b'
+        r'|patient\.org'
+        r'|(?:american|british)\s+(?:heart|cancer|diabetes|lung)\s+(?:association|society|foundation)'
+        r'|plain.?language\s+(?:resource|guide|version|leaflet)'
+        r'|easy.?to.?read\s+(?:version|guide|leaflet)'
+        r'|(?:patient|consumer)\s+(?:information\s+)?(?:leaflet|handout|guide))',
+        re.IGNORECASE,
+    ),
+}
+_TRANSITIONAL_PATTERN_ORDER = ["TEACH_BACK", "EMOTION_VALIDATE", "METAPHOR",
+                                "STEP", "LAY_LINK", "ACRONYM", "SIMPLE_SENTENCE"]
+
+# ── Specialized ───────────────────────────────────────────────────────────────
+_SPECIALIZED_PATTERNS: dict[str, re.Pattern] = {
+    "FULL_CITATION": re.compile(
+        r'\b(?:PMID\s*:?\s*\d{7,9}'
+        r'|DOI\s*:?\s*10\.\d{4,}/\S+'
+        r'|NCT\s*0*\d{7,8}'
+        r'|ISRCTN\s*\d+'
+        r'|EudraCT\s*\d{4}-\d{6}-\d{2}'
+        r'|(?:N\s*Engl\s*J\s*Med|NEJM|JAMA|Lancet|BMJ|Circulation|JACC|Ann\s+Intern\s+Med|Eur\s+Heart\s+J|Chest|Thorax)\b)',
+        re.IGNORECASE,
+    ),
+    "ADVANCED_FILTER": re.compile(
+        r'\b(?:PICO\b'
+        r'|(?:population|intervention|comparator?|comparison|outcome)\s*[,:]'
+        r'|systematic\s+review'
+        r'|meta.?analysis'
+        r'|(?:inclusion|exclusion)\s+criteria'
+        r'|(?:primary|secondary|composite)\s+endpoint'
+        r'|intention.to.treat\s+(?:analysis|population)'
+        r'|per.protocol\s+(?:analysis|population)'
+        r'|(?:sub)?group\s+analysis'
+        r'|sensitivity\s+analysis'
+        r'|(?:I²|I-squared|heterogeneity)'
+        r'|funnel\s+plot)',
+        re.IGNORECASE,
+    ),
+    "HIGH_UNCERTAINTY": re.compile(
+        r'(?:(?:debat|unclear|uncertain|not\s+(?:yet\s+)?(?:known|established|proven)|conflicting\s+evidence|no\s+consensus|limited\s+evidence|insufficient\s+data).{0,120}){2,}',
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "BRIDGE_TO_SELF": re.compile(
+        r'\b(?:(?:your|my)\s+(?:specific\s+)?(?:age|weight|bmi|condition|diagnosis|medical\s+history|situation|case)'
+        r'|how\s+(?:does\s+)?this\s+(?:apply|relate|translate)\s+to\s+(?:you|your\s+\w+)'
+        r'|given\s+(?:your|my)\s+(?:age|history|diagnosis|condition|profile)'
+        r'|personalis(?:e|ing|ed)|personaliz(?:e|ing|ed)\s+(?:this\s+)?(?:evidence|recommendation|finding)'
+        r'|(?:compare[ds]?|match(?:es)?)\s+(?:your|my)\s+(?:age|profile|condition)\s+(?:to|with|against))',
+        re.IGNORECASE,
+    ),
+    "VALIDATE_NARRATIVE": re.compile(
+        r'\b(?:thank\s+you\s+for\s+(?:sharing|telling|opening\s+up)'
+        r'|(?:I\s+)?appreciate\s+(?:you\s+)?sharing\s+(?:your\s+)?(?:experience|story|journey|that)'
+        r'|your\s+(?:experience|story|journey)\s+(?:is|sounds?|seems?|must\s+(?:have\s+been|be))'
+        r'|that\s+(?:must\s+(?:have\s+been|be)|sounds?)\s+(?:difficult|hard|challenging|frightening|overwhelming|a\s+lot)'
+        r'|living\s+with\s+\w+(?:\s+\w+)?\s+(?:can\s+be|is)\s+(?:difficult|challenging|hard|complex))',
+        re.IGNORECASE,
+    ),
+    "STORY_FORMAT": re.compile(
+        r'\b(?:(?:patient|a\s+\d+.year.old\s+\w+|he|she|they)\s+(?:felt|experienced|noticed|reported|described|presented|complained)'
+        r'|(?:after|before|when|while)\s+(?:she|he|they)\s+\w+ed\b'
+        r'|one\s+(?:patient|person|day|morning|evening)\b'
+        r'|(?:her|his|their)\s+(?:story|experience|journey|account)\b'
+        r'|(?:was|were)\s+(?:diagnosed|admitted|treated|referred)\s+(?:when|after|while|following))',
+        re.IGNORECASE,
+    ),
+    "GENTLE_EVIDENCE": re.compile(
+        r'\b(?:research\s+(?:also\s+)?(?:shows?|suggests?|indicates?|finds?)'
+        r'|studies\s+(?:also\s+)?(?:show|suggest|indicate|find|have\s+(?:shown|found))'
+        r'|evidence\s+(?:also\s+)?(?:shows?|suggests?|supports?|points\s+to)'
+        r'|adding\s+(?:one\s+)?(?:research|study)\s+finding'
+        r'|interestingly[,\s]+(?:research|studies|evidence|data)'
+        r'|(?:this\s+)?(?:aligns?\s+with|is\s+supported\s+by)\s+(?:research|evidence|studies)'
+        r'|building\s+on\s+(?:your\s+)?(?:experience|story|what\s+you\'ve\s+shared))',
+        re.IGNORECASE,
+    ),
+}
+_SPECIALIZED_PATTERN_ORDER = ["FULL_CITATION", "ADVANCED_FILTER", "HIGH_UNCERTAINTY",
+                               "BRIDGE_TO_SELF", "VALIDATE_NARRATIVE", "STORY_FORMAT",
+                               "GENTLE_EVIDENCE"]
 def clarity_consensus(text: str) -> dict:
     doc   = nlp(text)
     sents = list(doc.sents)
@@ -844,7 +1444,10 @@ def annotate_clarity(text: str) -> list:
     for (start, end), layer in jargon_spans.items():
         for i in range(start, min(end, n)):
             labels[i] = f"Jargon-{layer}"
-
+    # ── Layer 5: Medical quantities & units (highest priority — overrides all) ──
+    for m in _MEDICAL_QUANTITY_RE.finditer(text):
+        for i in range(m.start(), min(m.end(), n)):
+            labels[i] = "Quantity"
     segments, i = [], 0
     while i < n:
         label = labels[i]
@@ -855,7 +1458,264 @@ def annotate_clarity(text: str) -> list:
         i = j
     return segments
 
+# =============================================================================
+# PERSONA ANNOTATION FUNCTIONS
+# =============================================================================
 
+def annotate_balanced(text: str) -> list[tuple[str, str | None]]:
+    n      = len(text)
+    labels = [None] * n
+    for key in _BALANCED_PATTERN_ORDER:
+        pat = _BALANCED_PATTERNS[key]
+        for m in pat.finditer(text):
+            for i in range(m.start(), min(m.end(), n)):
+                if labels[i] is None:
+                    labels[i] = key
+    segments, i = [], 0
+    while i < n:
+        lab = labels[i]; j = i + 1
+        while j < n and labels[j] == lab: j += 1
+        segments.append((text[i:j], lab)); i = j
+    return segments
+
+
+def annotate_transitional(text: str) -> list[tuple[str, str | None]]:
+    doc    = nlp(text)
+    n      = len(text)
+    labels = [None] * n
+
+    # SIMPLE_SENTENCE — flag whole sentences that exceed 20 alphabetic tokens
+    for sent in doc.sents:
+        alpha_count = sum(1 for t in sent if t.is_alpha)
+        if alpha_count > 20:
+            for i in range(sent.start_char, min(sent.end_char, n)):
+                labels[i] = "SIMPLE_SENTENCE"
+
+    # Ordered pattern pass (higher-priority patterns first)
+    for key in _TRANSITIONAL_PATTERN_ORDER:
+        if key == "ACRONYM":
+            for m in _ACRONYM_RE.finditer(text):
+                for i in range(m.start(), min(m.end(), n)):
+                    if labels[i] is None:
+                        labels[i] = "ACRONYM"
+        elif key == "SIMPLE_SENTENCE":
+            continue   # already done above
+        else:
+            pat = _TRANSITIONAL_PATTERNS[key]
+            for m in pat.finditer(text):
+                for i in range(m.start(), min(m.end(), n)):
+                    if labels[i] is None:
+                        labels[i] = key
+
+    segments, i = [], 0
+    while i < n:
+        lab = labels[i]; j = i + 1
+        while j < n and labels[j] == lab: j += 1
+        segments.append((text[i:j], lab)); i = j
+    return segments
+
+
+def annotate_specialized(text: str) -> list[tuple[str, str | None]]:
+    n      = len(text)
+    labels = [None] * n
+    for key in _SPECIALIZED_PATTERN_ORDER:
+        pat = _SPECIALIZED_PATTERNS[key]
+        for m in pat.finditer(text):
+            for i in range(m.start(), min(m.end(), n)):
+                if labels[i] is None:
+                    labels[i] = key
+    segments, i = [], 0
+    while i < n:
+        lab = labels[i]; j = i + 1
+        while j < n and labels[j] == lab: j += 1
+        segments.append((text[i:j], lab)); i = j
+    return segments
+
+
+def _count_persona_markers(segments: list[tuple[str, str | None]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _, lab in segments:
+        if lab:
+            counts[lab] = counts.get(lab, 0) + 1
+    return counts
+
+
+def _build_persona_span_elements(
+    segments: list[tuple[str, str | None]],
+    colour_map: dict,
+) -> list:
+    """Render annotated segments as Dash html.Span elements with badge superscripts."""
+    elements = []
+    for segment, label in segments:
+        if label and label in colour_map:
+            cfg = colour_map[label]
+            elements.append(
+                html.Span(
+                    [
+                        html.Span(segment),
+                        html.Span(
+                            cfg["badge"],
+                            style={
+                                "background":    cfg["color"],
+                                "color":         "#0f172a",
+                                "borderRadius":  "3px",
+                                "padding":       "0 4px",
+                                "fontSize":      "0.6rem",
+                                "fontWeight":    "800",
+                                "verticalAlign": "super",
+                                "marginLeft":    "2px",
+                                "lineHeight":    "1",
+                            },
+                        ),
+                    ],
+                    title=cfg["label"],
+                    style={
+                        "background":   cfg["bg"],
+                        "color":        cfg["color"],
+                        "borderBottom": f"2px solid {cfg['color']}",
+                        "borderRadius": "3px",
+                        "padding":      "1px 3px",
+                        "fontWeight":   "600",
+                        "cursor":       "help",
+                    },
+                )
+            )
+        else:
+            elements.append(html.Span(segment, style={"color": "#cbd5e1"}))
+    return elements
+
+
+def _build_persona_legend(colour_map: dict) -> html.Div:
+    return html.Div(
+        style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "14px"},
+        children=[
+            html.Div(
+                style={"display": "flex", "alignItems": "center", "gap": "6px"},
+                children=[
+                    html.Span(
+                        cfg["badge"],
+                        style={
+                            "background":   cfg["color"],
+                            "color":        "#0f172a",
+                            "borderRadius": "3px",
+                            "padding":      "0 5px",
+                            "fontSize":     "0.68rem",
+                            "fontWeight":   "800",
+                        },
+                    ),
+                    html.Span(cfg["label"], style={"color": "#94a3b8", "fontSize": "0.78rem"}),
+                ],
+            )
+            for cfg in colour_map.values()
+        ],
+    )
+
+
+def _build_persona_summary_pills(counts: dict, colour_map: dict) -> html.Div:
+    if not counts:
+        return html.Span(
+            "No markers detected in this text.",
+            style={"color": "#475569", "fontSize": "0.8rem"},
+        )
+    return html.Div(
+        style={"display": "flex", "gap": "8px", "flexWrap": "wrap"},
+        children=[
+            html.Span(
+                [
+                    html.Span(
+                        colour_map[k]["badge"],
+                        style={"fontWeight": "800", "marginRight": "5px",
+                               "fontSize": "0.68rem", "letterSpacing": "0.04em"},
+                    ),
+                    html.Span(f"×{v}", style={"fontWeight": "600", "fontSize": "0.8rem"}),
+                ],
+                style={
+                    "background":   colour_map[k]["bg"],
+                    "color":        colour_map[k]["color"],
+                    "border":       f"1px solid {colour_map[k]['color']}",
+                    "borderRadius": "20px",
+                    "padding":      "3px 10px",
+                    "display":      "inline-flex",
+                    "alignItems":   "center",
+                },
+            )
+            for k, v in counts.items()
+            if k in colour_map
+        ],
+    )
+
+
+def _build_persona_annotation_section(
+    persona_name: str,
+    accent_color: str,
+    description: str,
+    segments: list,
+    colour_map: dict,
+    reading_level_line: html.Span | None = None,
+) -> html.Div:
+    counts = _count_persona_markers(segments)
+    total  = sum(counts.values())
+    return html.Div(
+        style={
+            "background":    "#1e293b",
+            "border":        f"1px solid {hex_to_rgba(accent_color, 0.4)}",
+            "borderRadius":  "12px",
+            "padding":       "20px",
+            "marginBottom":  "20px",
+        },
+        children=[
+            # ── Header ────────────────────────────────────────────────────────
+            html.Div(
+                style={"display": "flex", "justifyContent": "space-between",
+                       "alignItems": "flex-start", "marginBottom": "6px"},
+                children=[
+                    html.Div([
+                        html.P(
+                            f"TEXT ANNOTATION — {persona_name.upper()} PERSONA MARKERS",
+                            style={"color": "#64748b", "fontSize": "0.75rem", "fontWeight": "700",
+                                   "letterSpacing": "0.1em", "margin": "0 0 4px"},
+                        ),
+                        html.P(
+                            description,
+                            style={"color": "#475569", "fontSize": "0.76rem", "margin": "0"},
+                        ),
+                    ]),
+                    html.Span(
+                        f"{total} marker{'s' if total != 1 else ''} detected",
+                        style={
+                            "background":   hex_to_rgba(accent_color, 0.15),
+                            "color":        accent_color,
+                            "border":       f"1px solid {accent_color}",
+                            "borderRadius": "20px",
+                            "padding":      "4px 14px",
+                            "fontSize":     "0.78rem",
+                            "fontWeight":   "700",
+                            "whiteSpace":   "nowrap",
+                        },
+                    ),
+                ],
+            ),
+            # ── Reading level line (Transitional only) ────────────────────────
+            *([reading_level_line] if reading_level_line else []),
+            # ── Summary pills ─────────────────────────────────────────────────
+            _build_persona_summary_pills(counts, colour_map),
+            html.Hr(style={"borderColor": "#334155", "margin": "14px 0"}),
+            # ── Legend ────────────────────────────────────────────────────────
+            _build_persona_legend(colour_map),
+            html.Hr(style={"borderColor": "#334155", "margin": "0 0 14px"}),
+            # ── Annotated text ────────────────────────────────────────────────
+            html.Div(
+                _build_persona_span_elements(segments, colour_map),
+                style={
+                    "fontSize":      "0.95rem",
+                    "lineHeight":    "2.4",
+                    "fontFamily":    "'Courier New', monospace",
+                    "whiteSpace":    "pre-wrap",
+                    "wordBreak":     "break-word",
+                },
+            ),
+        ],
+    )
 # =============================================================================
 # DASH APP  (unchanged from v3)
 # =============================================================================
@@ -1310,7 +2170,13 @@ def run_analysis(n, text):
         style={"display":"flex","gap":"12px","flexWrap":"wrap","marginBottom":"14px"},
         children=clarity_legend_items,
     )
-
+    cfg = CLARITY_ANNOTATION_COLOURS["Quantity"]
+    clarity_legend_items.append(
+            html.Div(style={"display":"flex","alignItems":"center","gap":"6px"}, children=[
+                html.Div(style={"width":"11px","height":"11px","borderRadius":"2px","background":cfg["color"]}),
+                html.Span(cfg["label"], style={"color":"#94a3b8","fontSize":"0.78rem"}),
+            ])
+        )
     clarity_elements = []
     for segment, agent in annotate_clarity(text):
         if agent and agent in CLARITY_ANNOTATION_COLOURS:
@@ -1390,12 +2256,64 @@ def run_analysis(n, text):
                             "whiteSpace":"pre-wrap","wordBreak":"break-word"}),
         ],
     )
+    # ── Persona annotations ────────────────────────────────────────────────────
+    bal_segments  = annotate_balanced(text)
+    trans_segments = annotate_transitional(text)
+    spec_segments  = annotate_specialized(text)
 
+    fk_grade = textstat.flesch_kincaid_grade(text)
+    reading_level_line = html.Div(
+        style={"marginBottom": "10px"},
+        children=[
+            html.Span("Flesch-Kincaid grade level: ", style={"color": "#475569", "fontSize": "0.78rem"}),
+            html.Span(
+                f"{fk_grade:.1f}",
+                style={
+                    "color":      "#ef4444" if fk_grade > 7 else "#22c55e",
+                    "fontFamily": "Courier New",
+                    "fontWeight": "700",
+                    "fontSize":   "0.85rem",
+                },
+            ),
+            html.Span(
+                "  (target: grade 5 – 7 for Transitional readers)",
+                style={"color": "#475569", "fontSize": "0.75rem"},
+            ),
+        ],
+    )
+
+    balanced_annotation_section = _build_persona_annotation_section(
+        persona_name  = "Balanced",
+        accent_color  = PROFILE_COLOURS["Balanced"],
+        description   = "Health-savvy readers who want evidence, tradeoffs, and shared decisions.",
+        segments      = bal_segments,
+        colour_map    = BALANCED_MARKER_COLOURS,
+    )
+
+    transitional_annotation_section = _build_persona_annotation_section(
+        persona_name       = "Transitional",
+        accent_color       = PROFILE_COLOURS["Transitional"],
+        description        = "Low-HL readers who need plain language, analogies, and step-by-step safety guidance.",
+        segments           = trans_segments,
+        colour_map         = TRANSITIONAL_MARKER_COLOURS,
+        reading_level_line = reading_level_line,
+    )
+
+    specialized_annotation_section = _build_persona_annotation_section(
+        persona_name  = "Specialized",
+        accent_color  = PROFILE_COLOURS["Specialized"],
+        description   = "Research-strong (Digital) or narrative-strong (Functional) readers needing bridging.",
+        segments      = spec_segments,
+        colour_map    = SPECIALIZED_MARKER_COLOURS,
+    )
     return html.Div([
         hero,
         clarity_section,
         annotation_section,
         clarity_annotation_section,
+        balanced_annotation_section,
+        transitional_annotation_section,
+        specialized_annotation_section,
         charts,
         guidance,
         interp,
