@@ -1966,10 +1966,10 @@ app.layout = dbc.Container(
             style={"background":"linear-gradient(135deg,#1e293b 0%,#0f172a 100%)",
                    "borderBottom":"1px solid #334155","padding":"24px 40px","marginBottom":"28px"},
             children=[
-                html.H1("Health Literacy Profile Dashboard",
+                html.H1("Health Literacy Persona Dashboard ",
                         style={"color":"#f1f5f9","fontFamily":"Georgia,serif","fontWeight":"700",
                                "fontSize":"1.9rem","margin":"0","letterSpacing":"-0.5px"}),
-                html.P("Submit any health-related text to receive a full profile report and upgrade guidance.",
+                html.P("Submit any health-related text to receive a full profile report and persona analysis.",
                        style={"color":"#94a3b8","margin":"6px 0 0","fontSize":"0.9rem"}),
             ],
         ),
@@ -2489,12 +2489,64 @@ def run_analysis(n, text):
                             "whiteSpace":"pre-wrap","wordBreak":"break-word"}),
         ],
     )
- 
+    # ── Persona annotations ────────────────────────────────────────────────────
+    bal_segments  = annotate_balanced(text)
+    trans_segments = annotate_transitional(text)
+    spec_segments  = annotate_specialized(text)
+
+    fk_grade = textstat.flesch_kincaid_grade(text)
+    reading_level_line = html.Div(
+        style={"marginBottom": "10px"},
+        children=[
+            html.Span("Flesch-Kincaid grade level: ", style={"color": "#475569", "fontSize": "0.78rem"}),
+            html.Span(
+                f"{fk_grade:.1f}",
+                style={
+                    "color":      "#ef4444" if fk_grade > 7 else "#22c55e",
+                    "fontFamily": "Courier New",
+                    "fontWeight": "700",
+                    "fontSize":   "0.85rem",
+                },
+            ),
+            html.Span(
+                "  (target: grade 5 – 7 for Transitional readers)",
+                style={"color": "#475569", "fontSize": "0.75rem"},
+            ),
+        ],
+    )
+
+    balanced_annotation_section = _build_persona_annotation_section(
+        persona_name  = "Balanced",
+        accent_color  = PROFILE_COLOURS["Balanced"],
+        description   = "Health-savvy readers who want evidence, tradeoffs, and shared decisions.",
+        segments      = bal_segments,
+        colour_map    = BALANCED_MARKER_COLOURS,
+    )
+
+    transitional_annotation_section = _build_persona_annotation_section(
+        persona_name       = "Transitional",
+        accent_color       = PROFILE_COLOURS["Transitional"],
+        description        = "Low-HL readers who need plain language, analogies, and step-by-step safety guidance.",
+        segments           = trans_segments,
+        colour_map         = TRANSITIONAL_MARKER_COLOURS,
+        reading_level_line = reading_level_line,
+    )
+
+    specialized_annotation_section = _build_persona_annotation_section(
+        persona_name  = "Specialized",
+        accent_color  = PROFILE_COLOURS["Specialized"],
+        description   = "Research-strong (Digital) or narrative-strong (Functional) readers needing bridging.",
+        segments      = spec_segments,
+        colour_map    = SPECIALIZED_MARKER_COLOURS,
+    )
     return html.Div([
         hero,
         clarity_section,
         annotation_section,
         clarity_annotation_section,
+        balanced_annotation_section,
+        transitional_annotation_section,
+        specialized_annotation_section,
         charts,
         guidance,
         interp,
@@ -2502,4 +2554,4 @@ def run_analysis(n, text):
 
 
 if __name__ == "__main__":
-    app.run(debug=False, port=8080)
+    app.run(debug=False, port=8050)
